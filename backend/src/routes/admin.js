@@ -1,5 +1,14 @@
 const express = require('express');
 const router = express.Router();
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const Admin = require('../models/Admin');
+const User = require('../models/User');
+const Partner = require('../models/Partner');
+const Booking = require('../models/Booking');
+const Emergency = require('../models/Emergency');
+const { authenticateToken, authenticateAdmin } = require('../middleware/auth');
+const { validateAdminLogin } = require('../middleware/validation');
 
 /**
  * @swagger
@@ -63,12 +72,66 @@ const router = express.Router();
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.post('/login', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Admin login endpoint - Implementation pending'
-  });
+router.post('/login', validateAdminLogin, async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // Find admin by email
+    const admin = await Admin.findOne({ email }).select('+password');
+    if (!admin) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
+
+    // Check if admin is active
+    if (admin.status !== 'active') {
+      return res.status(401).json({
+        success: false,
+        message: 'Admin account is not active. Please contact super admin.'
+      });
+    }
+
+    // Verify password
+    const isPasswordValid = await bcrypt.compare(password, admin.password);
+    if (!isPasswordValid) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
+
+    // Generate JWT token
+    const token = jwt.sign(
+      { adminId: admin._id, email: admin.email, role: admin.role },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    // Update last login
+    admin.lastLogin = new Date();
+    await admin.save();
+
+    // Remove password from response
+    const adminResponse = admin.toObject();
+    delete adminResponse.password;
+
+    res.status(200).json({
+      success: true,
+      message: 'Admin login successful',
+      data: {
+        admin: adminResponse,
+        token
+      }
+    });
+  } catch (error) {
+    console.error('Admin login error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error during admin login'
+    });
+  }
 });
 
 /**
@@ -128,12 +191,86 @@ router.post('/login', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get('/dashboard', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Admin dashboard endpoint - Implementation pending'
-  });
+router.get('/dashboard', authenticateToken, authenticateAdmin, async (req, res) => {
+  try {
+    // Get current date and calculate date ranges
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startOfYear = new Date(now.getFullYear(), 0, 1);
+
+    // Get counts
+    const totalUsers = await User.countDocuments({ status: 'active' });
+    const totalPartners = await Partner.countDocuments({ status: 'approved' });
+    const totalBookings = await Booking.countDocuments();
+    const totalEmergencies = await Emergency.countDocuments();
+
+    // Get revenue data
+    const todayBookings = await Booking.find({
+      createdAt: { $gte: startOfDay },
+      status: 'completed'
+    });
+
+    const monthBookings = await Booking.find({
+      createdAt: { $gte: startOfMonth },
+      status: 'completed'
+    });
+
+    const yearBookings = await Booking.find({
+      createdAt: { $gte: startOfYear },
+      status: 'completed'
+    });
+
+    const calculateRevenue = (bookings) => {
+      return bookings.reduce((total, booking) => total + (booking.price || 0), 0);
+    };
+
+    const revenue = {
+      today: calculateRevenue(todayBookings),
+      thisMonth: calculateRevenue(monthBookings),
+      thisYear: calculateRevenue(yearBookings)
+    };
+
+    // Get recent bookings
+    const recentBookings = await Booking.find()
+      .populate('userId', 'name email')
+      .populate('partnerId', 'businessName')
+      .populate('serviceId', 'name')
+      .sort({ createdAt: -1 })
+      .limit(10);
+
+    // Get pending partner approvals
+    const pendingPartners = await Partner.countDocuments({ status: 'pending' });
+
+    // Get today's statistics
+    const todayUsers = await User.countDocuments({ createdAt: { $gte: startOfDay } });
+    const todayBookingsCount = await Booking.countDocuments({ createdAt: { $gte: startOfDay } });
+    const todayEmergencies = await Emergency.countDocuments({ createdAt: { $gte: startOfDay } });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        totalUsers,
+        totalPartners,
+        totalBookings,
+        totalEmergencies,
+        revenue,
+        recentBookings,
+        pendingPartners,
+        todayStats: {
+          newUsers: todayUsers,
+          newBookings: todayBookingsCount,
+          newEmergencies: todayEmergencies
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Get admin dashboard error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while retrieving dashboard statistics'
+    });
+  }
 });
 
 /**
@@ -205,12 +342,59 @@ router.get('/dashboard', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get('/users', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Get users endpoint - Implementation pending'
-  });
+router.get('/users', authenticateToken, authenticateAdmin, async (req, res) => {
+  try {
+    const { page = 1, limit = 20, search, status } = req.query;
+
+    // Build query
+    const query = {};
+    if (status) {
+      query.status = status;
+    }
+
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } },
+        { phone: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    // Pagination
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    // Get total count
+    const total = await User.countDocuments(query);
+
+    // Get users with pagination
+    const users = await User.find(query)
+      .select('-password')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum);
+
+    // Calculate pagination info
+    const pages = Math.ceil(total / limitNum);
+
+    res.status(200).json({
+      success: true,
+      data: users,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages
+      }
+    });
+  } catch (error) {
+    console.error('Get admin users error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while retrieving users'
+    });
+  }
 });
 
 /**
@@ -282,12 +466,59 @@ router.get('/users', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get('/partners', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Get partners endpoint - Implementation pending'
-  });
+router.get('/partners', authenticateToken, authenticateAdmin, async (req, res) => {
+  try {
+    const { page = 1, limit = 20, status, search } = req.query;
+
+    // Build query
+    const query = {};
+    if (status) {
+      query.status = status;
+    }
+
+    if (search) {
+      query.$or = [
+        { businessName: { $regex: search, $options: 'i' } },
+        { email: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    // Pagination
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    // Get total count
+    const total = await Partner.countDocuments(query);
+
+    // Get partners with pagination
+    const partners = await Partner.find(query)
+      .select('-password')
+      .populate('services.serviceId', 'name category')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum);
+
+    // Calculate pagination info
+    const pages = Math.ceil(total / limitNum);
+
+    res.status(200).json({
+      success: true,
+      data: partners,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages
+      }
+    });
+  } catch (error) {
+    console.error('Get admin partners error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while retrieving partners'
+    });
+  }
 });
 
 /**
@@ -342,12 +573,71 @@ router.get('/partners', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.post('/partners/:partnerId/approve', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Approve partner endpoint - Implementation pending'
-  });
+router.post('/partners/:partnerId/approve', authenticateToken, authenticateAdmin, async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    const { notes } = req.body;
+
+    // Validate partner ID format
+    if (!partnerId.match(/^[0-9a-fA-F]{24}$/)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid partner ID format'
+      });
+    }
+
+    // Find partner
+    const partner = await Partner.findById(partnerId);
+    if (!partner) {
+      return res.status(404).json({
+        success: false,
+        message: 'Partner not found'
+      });
+    }
+
+    // Check if partner can be approved
+    if (partner.status === 'approved') {
+      return res.status(400).json({
+        success: false,
+        message: 'Partner is already approved'
+      });
+    }
+
+    if (partner.status === 'rejected') {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot approve rejected partner. Please ask them to reapply.'
+      });
+    }
+
+    // Approve partner
+    partner.status = 'approved';
+    partner.approvedAt = new Date();
+    partner.approvedBy = req.user.adminId;
+    partner.approvalNotes = notes || 'Approved by admin';
+    partner.updatedAt = new Date();
+
+    await partner.save();
+
+    // TODO: Send approval notification to partner
+    // await sendPartnerApprovalNotification(partner);
+
+    res.status(200).json({
+      success: true,
+      message: 'Partner approved successfully',
+      data: {
+        partnerId,
+        status: 'approved',
+        approvedAt: partner.approvedAt
+      }
+    });
+  } catch (error) {
+    console.error('Approve partner error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while approving partner'
+    });
+  }
 });
 
 /**
@@ -404,12 +694,72 @@ router.post('/partners/:partnerId/approve', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.post('/partners/:partnerId/reject', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Reject partner endpoint - Implementation pending'
-  });
+router.post('/partners/:partnerId/reject', authenticateToken, authenticateAdmin, async (req, res) => {
+  try {
+    const { partnerId } = req.params;
+    const { reason } = req.body;
+
+    if (!reason) {
+      return res.status(400).json({
+        success: false,
+        message: 'Rejection reason is required'
+      });
+    }
+
+    // Validate partner ID format
+    if (!partnerId.match(/^[0-9a-fA-F]{24}$/)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid partner ID format'
+      });
+    }
+
+    // Find partner
+    const partner = await Partner.findById(partnerId);
+    if (!partner) {
+      return res.status(404).json({
+        success: false,
+        message: 'Partner not found'
+      });
+    }
+
+    // Check if partner can be rejected
+    if (['approved', 'rejected'].includes(partner.status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Partner is already processed'
+      });
+    }
+
+    // Reject partner
+    partner.status = 'rejected';
+    partner.rejectedAt = new Date();
+    partner.rejectedBy = req.user.adminId;
+    partner.rejectionReason = reason;
+    partner.updatedAt = new Date();
+
+    await partner.save();
+
+    // TODO: Send rejection notification to partner
+    // await sendPartnerRejectionNotification(partner, reason);
+
+    res.status(200).json({
+      success: true,
+      message: 'Partner rejected successfully',
+      data: {
+        partnerId,
+        status: 'rejected',
+        rejectedAt: partner.rejectedAt,
+        reason: partner.rejectionReason
+      }
+    });
+  } catch (error) {
+    console.error('Reject partner error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while rejecting partner'
+    });
+  }
 });
 
 /**
@@ -490,12 +840,63 @@ router.post('/partners/:partnerId/reject', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get('/bookings', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Get admin bookings endpoint - Implementation pending'
-  });
+router.get('/bookings', authenticateToken, authenticateAdmin, async (req, res) => {
+  try {
+    const { page = 1, limit = 20, status, dateFrom, dateTo } = req.query;
+
+    // Build query
+    const query = {};
+    if (status) {
+      query.status = status;
+    }
+
+    if (dateFrom || dateTo) {
+      query.createdAt = {};
+      if (dateFrom) {
+        query.createdAt.$gte = new Date(dateFrom);
+      }
+      if (dateTo) {
+        query.createdAt.$lte = new Date(dateTo + 'T23:59:59.999Z');
+      }
+    }
+
+    // Pagination
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    // Get total count
+    const total = await Booking.countDocuments(query);
+
+    // Get bookings with pagination
+    const bookings = await Booking.find(query)
+      .populate('userId', 'name email phone')
+      .populate('partnerId', 'businessName email phone')
+      .populate('serviceId', 'name category')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum);
+
+    // Calculate pagination info
+    const pages = Math.ceil(total / limitNum);
+
+    res.status(200).json({
+      success: true,
+      data: bookings,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages
+      }
+    });
+  } catch (error) {
+    console.error('Get admin bookings error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while retrieving bookings'
+    });
+  }
 });
 
 /**
@@ -568,12 +969,56 @@ router.get('/bookings', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get('/emergencies', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Get admin emergencies endpoint - Implementation pending'
-  });
+router.get('/emergencies', authenticateToken, authenticateAdmin, async (req, res) => {
+  try {
+    const { page = 1, limit = 20, status, priority } = req.query;
+
+    // Build query
+    const query = {};
+    if (status) {
+      query.status = status;
+    }
+
+    if (priority) {
+      query.priority = priority;
+    }
+
+    // Pagination
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    // Get total count
+    const total = await Emergency.countDocuments(query);
+
+    // Get emergencies with pagination
+    const emergencies = await Emergency.find(query)
+      .populate('userId', 'name email phone')
+      .populate('assignedPartner', 'businessName email phone')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum);
+
+    // Calculate pagination info
+    const pages = Math.ceil(total / limitNum);
+
+    res.status(200).json({
+      success: true,
+      data: emergencies,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages
+      }
+    });
+  } catch (error) {
+    console.error('Get admin emergencies error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while retrieving emergencies'
+    });
+  }
 });
 
 module.exports = router;

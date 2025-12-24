@@ -14,10 +14,7 @@ const setupDatabase = async () => {
     console.log('🔧 Setting up Rollon Database...');
     
     // Connect to MongoDB
-    await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/rollon', {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
+    await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/rollon');
     
     console.log('📊 Connected to MongoDB');
     

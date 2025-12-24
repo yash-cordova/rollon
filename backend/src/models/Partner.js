@@ -2,17 +2,16 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
 const partnerSchema = new mongoose.Schema({
-  // Basic Information
+  // Basic Information (Legacy - kept for backward compatibility)
   phoneNumber: {
     type: String,
-    required: true,
     unique: true,
+    sparse: true,
     trim: true,
     match: /^[6-9]\d{9}$/
   },
   name: {
     type: String,
-    required: true,
     trim: true,
     maxlength: 100
   },
@@ -41,6 +40,17 @@ const partnerSchema = new mongoose.Schema({
   // Business Information
   businessName: {
     type: String,
+    trim: true,
+    maxlength: 100
+  },
+  shopName: {
+    type: String,
+    required: true,
+    trim: true,
+    maxlength: 100
+  },
+  ownerName: {
+    type: String,
     required: true,
     trim: true,
     maxlength: 100
@@ -48,23 +58,64 @@ const partnerSchema = new mongoose.Schema({
   businessType: {
     type: String,
     enum: ['garage', 'tire_shop', 'petrol_pump', 'ev_charging', 'battery_swap', 'car_wash', 'towing', 'emergency_service', 'other'],
-    required: true
+    default: 'tire_shop'
   },
   businessDescription: {
     type: String,
     maxlength: 500
+  },
+  // New Registration Fields
+  mobileNumber: {
+    type: String,
+    required: true,
+    unique: true,
+    trim: true,
+    match: /^[6-9]\d{9}$/
+  },
+  whatsappNumber: {
+    type: String,
+    required: true,
+    trim: true,
+    match: /^[6-9]\d{9}$/
+  },
+  shopAddress: {
+    type: String,
+    required: true,
+    trim: true,
+    maxlength: 500
+  },
+  googleMapsLink: {
+    type: String,
+    trim: true
+  },
+  tyreBrands: [{
+    type: String,
+    enum: ['MRF', 'Apollo', 'CEAT', 'Michelin', 'JK Tyre', 'Other'],
+    trim: true
+  }],
+  storePhoto: {
+    data: Buffer,
+    contentType: String,
+    filename: String,
+    size: Number
+  },
+  priceList: {
+    data: Buffer,
+    contentType: String,
+    filename: String,
+    size: Number
   },
   
   // Location & Address
   location: {
     type: {
       type: String,
-      enum: ['Point'],
-      default: 'Point'
+      enum: ['Point']
+      // No default - location is optional
     },
     coordinates: {
       type: [Number],
-      required: true
+      required: false  // Optional - can be set later or from Google Maps link
     }
   },
   address: {
@@ -267,12 +318,21 @@ const partnerSchema = new mongoose.Schema({
 });
 
 // Indexes for better query performance
-partnerSchema.index({ phoneNumber: 1 });
+// Note: phoneNumber and mobileNumber already have indexes from unique: true
 partnerSchema.index({ location: '2dsphere' });
 partnerSchema.index({ businessType: 1 });
 partnerSchema.index({ isOnline: 1, isApproved: 1 });
 partnerSchema.index({ rating: -1 });
 partnerSchema.index({ createdAt: -1 });
+
+// Clean up location if coordinates are missing (for geospatial index)
+partnerSchema.pre('save', function(next) {
+  // If location exists but coordinates is missing or empty, remove location
+  if (this.location && (!this.location.coordinates || this.location.coordinates.length === 0)) {
+    this.location = undefined;
+  }
+  next();
+});
 
 // Hash password before saving
 partnerSchema.pre('save', async function(next) {

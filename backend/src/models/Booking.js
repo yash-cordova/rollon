@@ -238,7 +238,7 @@ const bookingSchema = new mongoose.Schema({
 });
 
 // Indexes for better query performance
-bookingSchema.index({ bookingId: 1 });
+// Note: bookingId already has index from unique: true
 bookingSchema.index({ userId: 1 });
 bookingSchema.index({ partnerId: 1 });
 bookingSchema.index({ status: 1 });

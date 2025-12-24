@@ -2,10 +2,7 @@ const mongoose = require('mongoose');
 
 const connectDB = async () => {
   try {
-    const conn = await mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://rollon:rollon@cluster0.33li06j.mongodb.net/rollon?retryWrites=true&w=majority&appName=Cluster0', {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
+    const conn = await mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://rollon:rollon@cluster0.33li06j.mongodb.net/rollon?retryWrites=true&w=majority&appName=Cluster0');
 
     console.log(`📊 MongoDB Connected: ${conn.connection.host}`);
     

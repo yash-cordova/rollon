@@ -78,9 +78,39 @@ const options = {
           type: 'object',
           properties: {
             _id: { type: 'string', example: '507f1f77bcf86cd799439012' },
+            shopName: { type: 'string', example: 'ABC Tire Shop', description: 'દુકાનનું નામ / दुकान का नाम' },
+            ownerName: { type: 'string', example: 'Rajesh Kumar', description: 'વ્યવસાય માલિકનું નામ / व्यवसाय मालिक का नाम' },
+            mobileNumber: { type: 'string', example: '9876543210', description: 'મોબાઈલ નંબર / मोबाइल नंबर' },
+            whatsappNumber: { type: 'string', example: '9876543210', description: 'વોટ્સએપ નંબર / व्हाट्सएप नंबर' },
+            shopAddress: { type: 'string', example: '123 Main Street, Ahmedabad, Gujarat 380001', description: 'દુકાનનું સરનામું / दुकान का पता' },
+            googleMapsLink: { type: 'string', example: 'https://maps.google.com/?q=23.0225,72.5714' },
+            tyreBrands: {
+              type: 'array',
+              items: { type: 'string', enum: ['MRF', 'Apollo', 'CEAT', 'Michelin', 'JK Tyre', 'Other'] },
+              example: ['MRF', 'Apollo', 'CEAT'],
+              description: 'વેચાતા ટાયર બ્રાન્ડ / बेचे जाने वाले टायर ब्रांड'
+            },
+            storePhoto: {
+              type: 'object',
+              properties: {
+                contentType: { type: 'string', example: 'image/jpeg' },
+                filename: { type: 'string', example: 'store-photo.jpg' },
+                size: { type: 'number', example: 245678 }
+              },
+              description: 'Store photo metadata (binary data not included in response)'
+            },
+            priceList: {
+              type: 'object',
+              properties: {
+                contentType: { type: 'string', example: 'application/pdf' },
+                filename: { type: 'string', example: 'price-list.pdf' },
+                size: { type: 'number', example: 456789 }
+              },
+              description: 'Price list metadata (binary data not included in response)'
+            },
             businessName: { type: 'string', example: 'ABC Auto Service' },
             email: { type: 'string', format: 'email', example: 'service@abcauto.com' },
-            phone: { type: 'string', example: '+919876543211' },
+            phoneNumber: { type: 'string', example: '9876543210' },
             location: {
               type: 'object',
               properties: {
@@ -88,7 +118,7 @@ const options = {
                 coordinates: {
                   type: 'array',
                   items: { type: 'number' },
-                  example: [77.2090, 28.6139]
+                  example: [72.5714, 23.0225]
                 }
               }
             },
@@ -97,8 +127,12 @@ const options = {
               items: { type: 'string' },
               example: ['507f1f77bcf86cd799439013']
             },
+            businessType: { type: 'string', enum: ['garage', 'tire_shop', 'petrol_pump', 'ev_charging', 'battery_swap', 'car_wash', 'towing', 'emergency_service', 'other'], example: 'tire_shop' },
+            approvalStatus: { type: 'string', enum: ['pending', 'approved', 'rejected', 'suspended'], example: 'pending' },
             rating: { type: 'number', example: 4.5 },
-            isApproved: { type: 'boolean', example: true }
+            isApproved: { type: 'boolean', example: false },
+            createdAt: { type: 'string', format: 'date-time' },
+            updatedAt: { type: 'string', format: 'date-time' }
           }
         },
         Booking: {

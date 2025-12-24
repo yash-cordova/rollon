@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+const Service = require('../models/Service');
+const Partner = require('../models/Partner');
 
 /**
  * @swagger
@@ -62,12 +64,58 @@ const router = express.Router();
  *                       type: integer
  *                       example: 3
  */
-router.get('/', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Get services endpoint - Implementation pending'
-  });
+router.get('/', async (req, res) => {
+  try {
+    const { category, search, page = 1, limit = 20 } = req.query;
+
+    // Build query
+    const query = { isActive: true };
+    
+    if (category) {
+      query.category = category;
+    }
+
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    // Pagination
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    // Get total count
+    const total = await Service.countDocuments(query);
+
+    // Get services with pagination
+    const services = await Service.find(query)
+      .sort({ name: 1 })
+      .skip(skip)
+      .limit(limitNum);
+
+    // Calculate pagination info
+    const pages = Math.ceil(total / limitNum);
+
+    res.status(200).json({
+      success: true,
+      data: services,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages
+      }
+    });
+  } catch (error) {
+    console.error('Get services error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while retrieving services'
+    });
+  }
 });
 
 /**
@@ -104,12 +152,45 @@ router.get('/', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get('/:serviceId', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Get service details endpoint - Implementation pending'
-  });
+router.get('/:serviceId', async (req, res) => {
+  try {
+    const { serviceId } = req.params;
+
+    // Validate service ID format
+    if (!serviceId.match(/^[0-9a-fA-F]{24}$/)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid service ID format'
+      });
+    }
+
+    const service = await Service.findById(serviceId);
+    
+    if (!service) {
+      return res.status(404).json({
+        success: false,
+        message: 'Service not found'
+      });
+    }
+
+    if (!service.isActive) {
+      return res.status(404).json({
+        success: false,
+        message: 'Service is not available'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: service
+    });
+  } catch (error) {
+    console.error('Get service details error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while retrieving service details'
+    });
+  }
 });
 
 /**
@@ -147,12 +228,50 @@ router.get('/:serviceId', (req, res) => {
  *                         type: string
  *                         example: "wrench"
  */
-router.get('/categories', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Get service categories endpoint - Implementation pending'
-  });
+router.get('/categories', async (req, res) => {
+  try {
+    const categories = [
+      {
+        id: 'maintenance',
+        name: 'Maintenance',
+        description: 'Regular maintenance services for your vehicle',
+        icon: 'wrench',
+        services: await Service.countDocuments({ category: 'maintenance', isActive: true })
+      },
+      {
+        id: 'repair',
+        name: 'Repair',
+        description: 'Vehicle repair and troubleshooting services',
+        icon: 'tools',
+        services: await Service.countDocuments({ category: 'repair', isActive: true })
+      },
+      {
+        id: 'emergency',
+        name: 'Emergency',
+        description: '24/7 emergency roadside assistance',
+        icon: 'exclamation-triangle',
+        services: await Service.countDocuments({ category: 'emergency', isActive: true })
+      },
+      {
+        id: 'inspection',
+        name: 'Inspection',
+        description: 'Vehicle inspection and diagnostic services',
+        icon: 'search',
+        services: await Service.countDocuments({ category: 'inspection', isActive: true })
+      }
+    ];
+
+    res.status(200).json({
+      success: true,
+      data: categories
+    });
+  } catch (error) {
+    console.error('Get service categories error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while retrieving service categories'
+    });
+  }
 });
 
 /**
@@ -218,12 +337,119 @@ router.get('/categories', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get('/:serviceId/providers', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Get service providers endpoint - Implementation pending'
-  });
+router.get('/:serviceId/providers', async (req, res) => {
+  try {
+    const { serviceId } = req.params;
+    const { latitude, longitude, radius = 10, rating } = req.query;
+
+    // Validate service ID format
+    if (!serviceId.match(/^[0-9a-fA-F]{24}$/)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid service ID format'
+      });
+    }
+
+    // Check if service exists
+    const service = await Service.findById(serviceId);
+    if (!service || !service.isActive) {
+      return res.status(404).json({
+        success: false,
+        message: 'Service not found'
+      });
+    }
+
+    // Build query for partners offering this service
+    const query = {
+      status: 'approved',
+      'services.serviceId': serviceId
+    };
+
+    // Add rating filter if provided
+    if (rating) {
+      const minRating = parseFloat(rating);
+      if (!isNaN(minRating) && minRating >= 1 && minRating <= 5) {
+        query.rating = { $gte: minRating };
+      }
+    }
+
+    let partners;
+
+    // If coordinates provided, search by location
+    if (latitude && longitude) {
+      const lat = parseFloat(latitude);
+      const lng = parseFloat(longitude);
+      const searchRadius = parseFloat(radius);
+
+      // Validate coordinates
+      if (isNaN(lat) || isNaN(lng) || isNaN(searchRadius) ||
+          lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid coordinate or radius values'
+        });
+      }
+
+      // Add location-based search
+      query.location = {
+        $near: {
+          $geometry: {
+            type: 'Point',
+            coordinates: [lng, lat] // MongoDB expects [longitude, latitude]
+          },
+          $maxDistance: searchRadius * 1000 // Convert km to meters
+        }
+      };
+
+      // Find nearby partners with location sorting
+      partners = await Partner.find(query)
+        .populate('services.serviceId', 'name description category')
+        .limit(50)
+        .sort({ rating: -1, 'location.coordinates': 1 });
+
+      // Calculate distances
+      partners = partners.map(partner => {
+        const partnerObj = partner.toObject();
+        const distance = calculateDistance(lat, lng, partner.location.coordinates[1], partner.location.coordinates[0]);
+        return {
+          ...partnerObj,
+          distance: Math.round(distance * 100) / 100
+        };
+      });
+
+      // Sort by distance
+      partners.sort((a, b) => a.distance - b.distance);
+    } else {
+      // Find all partners offering this service (no location filter)
+      partners = await Partner.find(query)
+        .populate('services.serviceId', 'name description category')
+        .sort({ rating: -1, businessName: 1 })
+        .limit(100);
+    }
+
+    res.status(200).json({
+      success: true,
+      data: partners
+    });
+  } catch (error) {
+    console.error('Get service providers error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while retrieving service providers'
+    });
+  }
 });
+
+// Helper function to calculate distance between two points using Haversine formula
+function calculateDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Radius of the Earth in kilometers
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c; // Distance in kilometers
+}
 
 module.exports = router;

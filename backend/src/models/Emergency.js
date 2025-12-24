@@ -209,7 +209,7 @@ const emergencySchema = new mongoose.Schema({
 });
 
 // Indexes for better query performance
-emergencySchema.index({ emergencyId: 1 });
+// Note: emergencyId already has index from unique: true
 emergencySchema.index({ userId: 1 });
 emergencySchema.index({ assignedPartnerId: 1 });
 emergencySchema.index({ status: 1 });

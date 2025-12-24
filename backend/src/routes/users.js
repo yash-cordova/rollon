@@ -1,5 +1,11 @@
 const express = require('express');
 const router = express.Router();
+const User = require('../models/User');
+const Partner = require('../models/Partner');
+const Booking = require('../models/Booking');
+const Emergency = require('../models/Emergency');
+const { authenticateToken } = require('../middleware/auth');
+const { validateProfileUpdate, validateLocationUpdate, validateVehicleUpdate } = require('../middleware/validation');
 
 /**
  * @swagger
@@ -29,12 +35,27 @@ const router = express.Router();
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get('/profile', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Get profile endpoint - Implementation pending'
-  });
+router.get('/profile', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: user
+    });
+  } catch (error) {
+    console.error('Get profile error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while retrieving profile'
+    });
+  }
 });
 
 /**
@@ -108,12 +129,67 @@ router.get('/profile', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.put('/profile', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Update profile endpoint - Implementation pending'
-  });
+router.put('/profile', authenticateToken, validateProfileUpdate, async (req, res) => {
+  try {
+    const { name, email, phone, address, emergencyContacts } = req.body;
+    const userId = req.user.userId;
+
+    // Check if email is already taken by another user
+    if (email) {
+      const existingUser = await User.findOne({ email, _id: { $ne: userId } });
+      if (existingUser) {
+        return res.status(409).json({
+          success: false,
+          message: 'Email already taken by another user'
+        });
+      }
+    }
+
+    // Check if phone is already taken by another user
+    if (phone) {
+      const existingUser = await User.findOne({ phone, _id: { $ne: userId } });
+      if (existingUser) {
+        return res.status(409).json({
+          success: false,
+          message: 'Phone number already taken by another user'
+        });
+      }
+    }
+
+    // Update user profile
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      {
+        $set: {
+          ...(name && { name }),
+          ...(email && { email }),
+          ...(phone && { phone }),
+          ...(address && { address }),
+          ...(emergencyContacts && { emergencyContacts })
+        }
+      },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Profile updated successfully',
+      data: updatedUser
+    });
+  } catch (error) {
+    console.error('Update profile error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while updating profile'
+    });
+  }
 });
 
 /**
@@ -163,12 +239,64 @@ router.put('/profile', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.put('/location', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Update location endpoint - Implementation pending'
-  });
+router.put('/location', authenticateToken, validateLocationUpdate, async (req, res) => {
+  try {
+    const { latitude, longitude, address } = req.body;
+    const userId = req.user.userId;
+
+    // Validate coordinates
+    if (latitude < -90 || latitude > 90) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid latitude value'
+      });
+    }
+
+    if (longitude < -180 || longitude > 180) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid longitude value'
+      });
+    }
+
+    // Update user location
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      {
+        $set: {
+          location: {
+            type: 'Point',
+            coordinates: [longitude, latitude] // MongoDB expects [longitude, latitude]
+          },
+          address: address || ''
+        }
+      },
+      { new: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Location updated successfully',
+      data: {
+        latitude,
+        longitude,
+        address: updatedUser.address
+      }
+    });
+  } catch (error) {
+    console.error('Update location error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while updating location'
+    });
+  }
 });
 
 /**
@@ -230,12 +358,71 @@ router.put('/location', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.put('/vehicle', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Update vehicle endpoint - Implementation pending'
-  });
+router.put('/vehicle', authenticateToken, validateVehicleUpdate, async (req, res) => {
+  try {
+    const { make, model, year, registrationNumber, color, fuelType } = req.body;
+    const userId = req.user.userId;
+
+    // Validate year
+    const currentYear = new Date().getFullYear();
+    if (year < 1900 || year > currentYear + 1) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid vehicle year'
+      });
+    }
+
+    // Check if registration number is already taken by another user
+    if (registrationNumber) {
+      const existingUser = await User.findOne({
+        'vehicleDetails.registrationNumber': registrationNumber,
+        _id: { $ne: userId }
+      });
+      if (existingUser) {
+        return res.status(409).json({
+          success: false,
+          message: 'Vehicle registration number already registered by another user'
+        });
+      }
+    }
+
+    // Update vehicle details
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      {
+        $set: {
+          vehicleDetails: {
+            make,
+            model,
+            year,
+            registrationNumber,
+            color: color || '',
+            fuelType: fuelType || 'petrol'
+          }
+        }
+      },
+      { new: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Vehicle details updated successfully',
+      data: updatedUser.vehicleDetails
+    });
+  } catch (error) {
+    console.error('Update vehicle error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while updating vehicle details'
+    });
+  }
 });
 
 /**
@@ -302,12 +489,85 @@ router.put('/vehicle', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get('/nearby-services', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Nearby services endpoint - Implementation pending'
-  });
+router.get('/nearby-services', authenticateToken, async (req, res) => {
+  try {
+    const { latitude, longitude, radius = 10, service } = req.query;
+
+    // Validate coordinates
+    if (!latitude || !longitude) {
+      return res.status(400).json({
+        success: false,
+        message: 'Latitude and longitude are required'
+      });
+    }
+
+    const lat = parseFloat(latitude);
+    const lng = parseFloat(longitude);
+    const searchRadius = parseFloat(radius);
+
+    if (isNaN(lat) || isNaN(lng) || isNaN(searchRadius)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid coordinate or radius values'
+      });
+    }
+
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid coordinate values'
+      });
+    }
+
+    // Build query for nearby partners
+    const query = {
+      status: 'approved',
+      location: {
+        $near: {
+          $geometry: {
+            type: 'Point',
+            coordinates: [lng, lat] // MongoDB expects [longitude, latitude]
+          },
+          $maxDistance: searchRadius * 1000 // Convert km to meters
+        }
+      }
+    };
+
+    // Add service filter if provided
+    if (service) {
+      query.services = service;
+    }
+
+    // Find nearby partners
+    const nearbyPartners = await Partner.find(query)
+      .populate('services.serviceId', 'name description category')
+      .limit(50)
+      .sort({ rating: -1, 'location.coordinates': 1 });
+
+    // Calculate distances and format response
+    const partnersWithDistance = nearbyPartners.map(partner => {
+      const partnerObj = partner.toObject();
+      const distance = calculateDistance(lat, lng, partner.location.coordinates[1], partner.location.coordinates[0]);
+      return {
+        ...partnerObj,
+        distance: Math.round(distance * 100) / 100 // Round to 2 decimal places
+      };
+    });
+
+    // Sort by distance
+    partnersWithDistance.sort((a, b) => a.distance - b.distance);
+
+    res.status(200).json({
+      success: true,
+      data: partnersWithDistance
+    });
+  } catch (error) {
+    console.error('Get nearby services error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while retrieving nearby services'
+    });
+  }
 });
 
 /**
@@ -374,12 +634,53 @@ router.get('/nearby-services', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get('/bookings', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Get bookings endpoint - Implementation pending'
-  });
+router.get('/bookings', authenticateToken, async (req, res) => {
+  try {
+    const { status, page = 1, limit = 10 } = req.query;
+    const userId = req.user.userId;
+
+    // Build query
+    const query = { userId };
+    if (status) {
+      query.status = status;
+    }
+
+    // Pagination
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    // Get total count
+    const total = await Booking.countDocuments(query);
+
+    // Get bookings with pagination
+    const bookings = await Booking.find(query)
+      .populate('partnerId', 'businessName email phone address')
+      .populate('serviceId', 'name description category')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum);
+
+    // Calculate pagination info
+    const pages = Math.ceil(total / limitNum);
+
+    res.status(200).json({
+      success: true,
+      data: bookings,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages
+      }
+    });
+  } catch (error) {
+    console.error('Get bookings error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while retrieving bookings'
+    });
+  }
 });
 
 /**
@@ -446,12 +747,64 @@ router.get('/bookings', (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.get('/emergencies', (req, res) => {
-  // Implementation will be added later
-  res.status(501).json({
-    success: false,
-    message: 'Get emergencies endpoint - Implementation pending'
-  });
+router.get('/emergencies', authenticateToken, async (req, res) => {
+  try {
+    const { status, page = 1, limit = 10 } = req.query;
+    const userId = req.user.userId;
+
+    // Build query
+    const query = { userId };
+    if (status) {
+      query.status = status;
+    }
+
+    // Pagination
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    // Get total count
+    const total = await Emergency.countDocuments(query);
+
+    // Get emergencies with pagination
+    const emergencies = await Emergency.find(query)
+      .populate('assignedPartner', 'businessName email phone address')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum);
+
+    // Calculate pagination info
+    const pages = Math.ceil(total / limitNum);
+
+    res.status(200).json({
+      success: true,
+      data: emergencies,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages
+      }
+    });
+  } catch (error) {
+    console.error('Get emergencies error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while retrieving emergencies'
+    });
+  }
 });
+
+// Helper function to calculate distance between two points using Haversine formula
+function calculateDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Radius of the Earth in kilometers
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c; // Distance in kilometers
+}
 
 module.exports = router;

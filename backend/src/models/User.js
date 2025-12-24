@@ -161,7 +161,7 @@ const userSchema = new mongoose.Schema({
 });
 
 // Indexes for better query performance
-userSchema.index({ phoneNumber: 1 });
+// Note: phoneNumber already has index from unique: true
 userSchema.index({ currentLocation: '2dsphere' });
 userSchema.index({ 'vehicles.registrationNumber': 1 });
 userSchema.index({ createdAt: -1 });
