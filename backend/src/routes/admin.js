@@ -419,16 +419,26 @@ router.get('/users', authenticateToken, authenticateAdmin, async (req, res) => {
  *           default: 20
  *         description: Number of items per page
  *       - in: query
- *         name: status
+ *         name: approvalStatus
  *         schema:
  *           type: string
  *           enum: ["pending", "approved", "rejected", "suspended"]
  *         description: Filter by approval status
  *       - in: query
+ *         name: isApproved
+ *         schema:
+ *           type: boolean
+ *         description: Filter by approval boolean (true/false)
+ *       - in: query
  *         name: search
  *         schema:
  *           type: string
- *         description: Search by business name or email
+ *         description: Search by shop name, business name, owner name, mobile number, or email
+ *       - in: query
+ *         name: mobileNumber
+ *         schema:
+ *           type: string
+ *         description: Filter by mobile number
  *     responses:
  *       200:
  *         description: Partners retrieved successfully
@@ -468,19 +478,59 @@ router.get('/users', authenticateToken, authenticateAdmin, async (req, res) => {
  */
 router.get('/partners', authenticateToken, authenticateAdmin, async (req, res) => {
   try {
-    const { page = 1, limit = 20, status, search } = req.query;
+    const { 
+      page = 1, 
+      limit = 20, 
+      approvalStatus, 
+      isApproved,
+      search,
+      mobileNumber
+    } = req.query;
 
     // Build query
     const query = {};
-    if (status) {
-      query.status = status;
+    
+    // Filter by approvalStatus
+    if (approvalStatus) {
+      query.approvalStatus = approvalStatus;
+    }
+    
+    // Filter by isApproved (boolean)
+    if (isApproved !== undefined) {
+      query.isApproved = isApproved === 'true' || isApproved === true;
     }
 
-    if (search) {
+    // Filter by mobile number
+    if (mobileNumber) {
       query.$or = [
-        { businessName: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } }
+        { mobileNumber },
+        { phoneNumber: mobileNumber }
       ];
+    }
+
+    // Search functionality
+    if (search) {
+      const searchRegex = { $regex: search, $options: 'i' };
+      const searchConditions = [
+        { shopName: searchRegex },
+        { businessName: searchRegex },
+        { ownerName: searchRegex },
+        { name: searchRegex },
+        { email: searchRegex },
+        { mobileNumber: searchRegex },
+        { phoneNumber: searchRegex }
+      ];
+      
+      if (query.$or) {
+        // If mobileNumber filter exists, combine with search
+        query.$and = [
+          { $or: query.$or },
+          { $or: searchConditions }
+        ];
+        delete query.$or;
+      } else {
+        query.$or = searchConditions;
+      }
     }
 
     // Pagination
@@ -492,8 +542,9 @@ router.get('/partners', authenticateToken, authenticateAdmin, async (req, res) =
     const total = await Partner.countDocuments(query);
 
     // Get partners with pagination
+    // Exclude password and file binary data for better performance
     const partners = await Partner.find(query)
-      .select('-password')
+      .select('-password -storePhoto.data -priceList.data')
       .populate('services.serviceId', 'name category')
       .sort({ createdAt: -1 })
       .skip(skip)
@@ -510,13 +561,174 @@ router.get('/partners', authenticateToken, authenticateAdmin, async (req, res) =
         limit: limitNum,
         total,
         pages
+      },
+      filters: {
+        approvalStatus: approvalStatus || null,
+        isApproved: isApproved !== undefined ? (isApproved === 'true' || isApproved === true) : null,
+        search: search || null,
+        mobileNumber: mobileNumber || null
       }
     });
   } catch (error) {
     console.error('Get admin partners error:', error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error while retrieving partners'
+      message: 'Internal server error while retrieving partners',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /admin/partners/approve-by-mobile:
+ *   post:
+ *     summary: Approve partner by mobile number
+ *     description: Search partner by mobile number and approve them (set isApproved to true and approvalStatus to approved)
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - mobileNumber
+ *             properties:
+ *               mobileNumber:
+ *                 type: string
+ *                 pattern: '^[6-9]\d{9}$'
+ *                 example: "9876543210"
+ *                 description: 10-digit Indian mobile number
+ *               notes:
+ *                 type: string
+ *                 example: "All documents verified and approved"
+ *     responses:
+ *       200:
+ *         description: Partner approved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: "Partner approved successfully"
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     partnerId:
+ *                       type: string
+ *                     mobileNumber:
+ *                       type: string
+ *                     isApproved:
+ *                       type: boolean
+ *                       example: true
+ *                     approvalStatus:
+ *                       type: string
+ *                       example: "approved"
+ *                     approvedAt:
+ *                       type: string
+ *                       format: date-time
+ *       400:
+ *         description: Partner already approved or invalid mobile number
+ *       401:
+ *         description: Unauthorized
+ *       404:
+ *         description: Partner not found
+ */
+router.post('/partners/approve-by-mobile', authenticateToken, authenticateAdmin, async (req, res) => {
+  try {
+    const { mobileNumber, notes } = req.body;
+
+    // Validate mobile number
+    if (!mobileNumber) {
+      return res.status(400).json({
+        success: false,
+        message: 'Mobile number is required'
+      });
+    }
+
+    if (!mobileNumber.match(/^[6-9]\d{9}$/)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid mobile number format. Must be 10 digits starting with 6-9'
+      });
+    }
+
+    // Find partner by mobile number
+    const partner = await Partner.findOne({
+      $or: [
+        { mobileNumber },
+        { phoneNumber: mobileNumber }
+      ]
+    });
+
+    if (!partner) {
+      return res.status(404).json({
+        success: false,
+        message: `Partner with mobile number ${mobileNumber} not found`
+      });
+    }
+
+    // Check if partner is already approved
+    if (partner.isApproved === true && partner.approvalStatus === 'approved') {
+      return res.status(400).json({
+        success: false,
+        message: 'Partner is already approved',
+        data: {
+          partnerId: partner._id,
+          mobileNumber: partner.mobileNumber || partner.phoneNumber,
+          isApproved: partner.isApproved,
+          approvalStatus: partner.approvalStatus
+        }
+      });
+    }
+
+    // Check if partner was rejected
+    if (partner.approvalStatus === 'rejected') {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot approve rejected partner. Please ask them to reapply.'
+      });
+    }
+
+    // Approve partner
+    partner.isApproved = true;
+    partner.approvalStatus = 'approved';
+    partner.approvalDate = new Date();
+    partner.approvedBy = req.user.adminId || req.user._id;
+    
+    if (notes) {
+      partner.approvalNotes = notes;
+    }
+
+    await partner.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Partner approved successfully',
+      data: {
+        partnerId: partner._id,
+        mobileNumber: partner.mobileNumber || partner.phoneNumber,
+        shopName: partner.shopName || partner.businessName,
+        ownerName: partner.ownerName || partner.name,
+        isApproved: partner.isApproved,
+        approvalStatus: partner.approvalStatus,
+        approvedAt: partner.approvalDate
+      }
+    });
+  } catch (error) {
+    console.error('Approve partner by mobile error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while approving partner',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -525,7 +737,7 @@ router.get('/partners', authenticateToken, authenticateAdmin, async (req, res) =
  * @swagger
  * /admin/partners/{partnerId}/approve:
  *   post:
- *     summary: Approve partner registration
+ *     summary: Approve partner registration by ID
  *     tags: [Admin]
  *     security:
  *       - bearerAuth: []
@@ -596,14 +808,14 @@ router.post('/partners/:partnerId/approve', authenticateToken, authenticateAdmin
     }
 
     // Check if partner can be approved
-    if (partner.status === 'approved') {
+    if (partner.isApproved === true && partner.approvalStatus === 'approved') {
       return res.status(400).json({
         success: false,
         message: 'Partner is already approved'
       });
     }
 
-    if (partner.status === 'rejected') {
+    if (partner.approvalStatus === 'rejected') {
       return res.status(400).json({
         success: false,
         message: 'Cannot approve rejected partner. Please ask them to reapply.'
@@ -611,11 +823,11 @@ router.post('/partners/:partnerId/approve', authenticateToken, authenticateAdmin
     }
 
     // Approve partner
-    partner.status = 'approved';
-    partner.approvedAt = new Date();
-    partner.approvedBy = req.user.adminId;
+    partner.isApproved = true;
+    partner.approvalStatus = 'approved';
+    partner.approvalDate = new Date();
+    partner.approvedBy = req.user.adminId || req.user._id;
     partner.approvalNotes = notes || 'Approved by admin';
-    partner.updatedAt = new Date();
 
     await partner.save();
 
@@ -627,8 +839,9 @@ router.post('/partners/:partnerId/approve', authenticateToken, authenticateAdmin
       message: 'Partner approved successfully',
       data: {
         partnerId,
-        status: 'approved',
-        approvedAt: partner.approvedAt
+        isApproved: partner.isApproved,
+        approvalStatus: partner.approvalStatus,
+        approvedAt: partner.approvalDate
       }
     });
   } catch (error) {

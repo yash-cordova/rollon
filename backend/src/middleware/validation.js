@@ -252,7 +252,8 @@ const validatePartnerRegistration = [
     .withMessage('Business name must be between 2 and 100 characters'),
   
   body('email')
-    .optional()
+    .notEmpty()
+    .withMessage('Email is required')
     .isEmail()
     .normalizeEmail()
     .withMessage('Please provide a valid email address'),
@@ -304,16 +305,36 @@ const validatePartnerRegistration = [
 
 /**
  * Validation rules for partner login
+ * Accepts either email or phone (mobileNumber)
  */
 const validatePartnerLogin = [
   body('email')
+    .optional()
     .isEmail()
     .normalizeEmail()
     .withMessage('Please provide a valid email address'),
   
+  body('phone')
+    .optional()
+    .matches(/^[6-9]\d{9}$/)
+    .withMessage('Please provide a valid 10-digit Indian mobile number'),
+  
+  body('mobileNumber')
+    .optional()
+    .matches(/^[6-9]\d{9}$/)
+    .withMessage('Please provide a valid 10-digit Indian mobile number'),
+  
   body('password')
     .notEmpty()
     .withMessage('Password is required'),
+  
+  // Custom validation: at least one of email, phone, or mobileNumber must be provided
+  body().custom((value) => {
+    if (!value.email && !value.phone && !value.mobileNumber) {
+      throw new Error('Either email, phone, or mobileNumber is required');
+    }
+    return true;
+  }),
   
   handleValidationErrors
 ];

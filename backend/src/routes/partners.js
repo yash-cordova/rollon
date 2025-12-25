@@ -24,6 +24,7 @@ const { uploadPartnerFiles, handleUploadError } = require('../middleware/upload'
  *       - Mobile Number (મોબાઈલ નંબર / मोबाइल नंबर) - 10 digit Indian number
  *       - WhatsApp Number (વોટ્સએપ નંબર / व्हाट्सएप नंबर) - 10 digit Indian number
  *       - Shop Address (દુકાનનું સરનામું / दुकान का पता)
+ *       - Email Address - Valid email address
  *       - Tyre Brands (વેચાતા ટાયર બ્રાન્ડ / बेचे जाने वाले टायर ब्रांड) - At least one brand required
  *       - Store Photo (દુકાનનો ફોટો / दुकान का फोटो) - Max 10 MB (JPEG, PNG, GIF, WebP)
  *       - Price List (ટાયર ભાવ યાદી / टायर प्राइस लिस्ट) - Max 10 MB (PDF, Excel)
@@ -46,6 +47,7 @@ const { uploadPartnerFiles, handleUploadError } = require('../middleware/upload'
  *               - mobileNumber
  *               - whatsappNumber
  *               - shopAddress
+ *               - email
  *               - tyreBrands
  *               - storePhoto
  *               - priceList
@@ -79,6 +81,11 @@ const { uploadPartnerFiles, handleUploadError } = require('../middleware/upload'
  *                 example: "123 Main Street, Ahmedabad, Gujarat 380001"
  *                 minLength: 10
  *                 maxLength: 500
+ *               email:
+ *                 type: string
+ *                 format: email
+ *                 description: Email address (Required)
+ *                 example: "service@abcauto.com"
  *               googleMapsLink:
  *                 type: string
  *                 format: uri
@@ -257,8 +264,8 @@ router.post('/register', uploadPartnerFiles, handleUploadError, validatePartnerR
       });
     }
 
-    const saltRounds = 12;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
+    // IMPORTANT: Don't hash the password here - the Partner model's pre-save hook will hash it automatically
+    // Just set the plain password and let the pre-save hook handle hashing
 
     // Handle file uploads (both are required, so we can safely access them)
     const storePhotoFile = req.files.storePhoto[0];
@@ -317,13 +324,14 @@ router.post('/register', uploadPartnerFiles, handleUploadError, validatePartnerR
     }
 
     // Create new partner with new fields
+    // NOTE: Set password as plain text - the Partner model's pre-save hook will hash it automatically
     const partnerData = {
       shopName,
       ownerName,
       mobileNumber,
       whatsappNumber,
       shopAddress,
-      password: hashedPassword,
+      password: password.trim(), // Plain password - pre-save hook will hash it
       tyreBrands: parsedTyreBrands,
       storePhoto: storePhotoData,
       priceList: priceListData,
@@ -379,7 +387,8 @@ router.post('/register', uploadPartnerFiles, handleUploadError, validatePartnerR
  * @swagger
  * /partners/login:
  *   post:
- *     summary: Login partner
+ *     summary: Login partner with email or phone
+ *     description: Login partner using email or mobile number (phone/mobileNumber) and password. JWT token is stored in HTTP-only cookie.
  *     tags: [Partners]
  *     requestBody:
  *       required: true
@@ -388,19 +397,44 @@ router.post('/register', uploadPartnerFiles, handleUploadError, validatePartnerR
  *           schema:
  *             type: object
  *             required:
- *               - email
  *               - password
+ *             oneOf:
+ *               - required:
+ *                   - email
+ *               - required:
+ *                   - phone
+ *               - required:
+ *                   - mobileNumber
  *             properties:
  *               email:
  *                 type: string
  *                 format: email
  *                 example: "service@abcauto.com"
+ *                 description: Email address (required if phone/mobileNumber not provided)
+ *               phone:
+ *                 type: string
+ *                 pattern: '^[6-9]\d{9}$'
+ *                 example: "9876543210"
+ *                 description: 10-digit Indian mobile number (required if email not provided)
+ *               mobileNumber:
+ *                 type: string
+ *                 pattern: '^[6-9]\d{9}$'
+ *                 example: "9876543210"
+ *                 description: 10-digit Indian mobile number (required if email not provided)
  *               password:
  *                 type: string
+ *                 format: password
  *                 example: "password123"
+ *                 description: Partner password
  *     responses:
  *       200:
- *         description: Login successful
+ *         description: Login successful. JWT token stored in HTTP-only cookie (web) and returned in response body (mobile).
+ *         headers:
+ *           Set-Cookie:
+ *             description: JWT token in HTTP-only cookie (for web browsers)
+ *             schema:
+ *               type: string
+ *               example: "partnerToken=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...; HttpOnly; Secure; SameSite=Strict; Max-Age=604800"
  *         content:
  *           application/json:
  *             schema:
@@ -411,7 +445,7 @@ router.post('/register', uploadPartnerFiles, handleUploadError, validatePartnerR
  *                   example: true
  *                 message:
  *                   type: string
- *                   example: "Login successful"
+ *                   example: "Login successful. Token stored in cookie (web) and returned in response (mobile)."
  *                 data:
  *                   type: object
  *                   properties:
@@ -419,9 +453,10 @@ router.post('/register', uploadPartnerFiles, handleUploadError, validatePartnerR
  *                       $ref: '#/components/schemas/Partner'
  *                     token:
  *                       type: string
+ *                       description: JWT token for mobile apps (store in secure storage)
  *                       example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
  *       401:
- *         description: Invalid credentials
+ *         description: Invalid credentials or account not approved
  *         content:
  *           application/json:
  *             schema:
@@ -429,37 +464,124 @@ router.post('/register', uploadPartnerFiles, handleUploadError, validatePartnerR
  */
 router.post('/login', validatePartnerLogin, async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, phone, mobileNumber, password } = req.body;
 
-    // Find partner by email
-    const partner = await Partner.findOne({ email }).select('+password');
+    // Normalize phone number (remove spaces, dashes, country code if present)
+    const normalizePhone = (phoneNum) => {
+      if (!phoneNum) return null;
+      // Remove all non-digit characters
+      let normalized = phoneNum.replace(/\D/g, '');
+      // Remove country code if present (91 for India)
+      if (normalized.length === 12 && normalized.startsWith('91')) {
+        normalized = normalized.substring(2);
+      }
+      // Should be 10 digits
+      return normalized.length === 10 ? normalized : phoneNum.trim();
+    };
+
+    // Build query to find partner by email or phone
+    const query = {};
+    if (email) {
+      query.email = email.toLowerCase().trim();
+    } else if (phone || mobileNumber) {
+      const phoneNum = normalizePhone(phone || mobileNumber);
+      query.$or = [
+        { mobileNumber: phoneNum },
+        { phoneNumber: phoneNum },
+        { mobileNumber: phone || mobileNumber }, // Also try original format
+        { phoneNumber: phone || mobileNumber }
+      ];
+    }
+
+    // Debug: Log the query (remove in production)
+    console.log('Login query:', JSON.stringify(query, null, 2));
+    console.log('Searching for:', email || phone || mobileNumber);
+
+    // Find partner
+    const partner = await Partner.findOne(query).select('+password');
+    
     if (!partner) {
+      console.log('Partner not found with query:', query);
+      // Try to find any partner with similar phone to help debug
+      if (phone || mobileNumber) {
+        const phoneNum = normalizePhone(phone || mobileNumber);
+        const allPartners = await Partner.find({
+          $or: [
+            { mobileNumber: { $regex: phoneNum.slice(-4) } },
+            { phoneNumber: { $regex: phoneNum.slice(-4) } }
+          ]
+        }).select('mobileNumber phoneNumber email');
+        console.log('Similar partners found:', allPartners.length);
+      }
       return res.status(401).json({
         success: false,
-        message: 'Invalid email or password'
+        message: 'Invalid email/phone or password',
+        debug: process.env.NODE_ENV === 'development' ? { query, searched: email || phone || mobileNumber } : undefined
       });
     }
+
+    console.log('Partner found:', partner._id, 'Mobile:', partner.mobileNumber || partner.phoneNumber, 'Has password:', !!partner.password);
 
     // Check if partner is approved
-    if (partner.status !== 'approved') {
+    // COMMENTED OUT: Allow login regardless of approval status for now
+    // if (partner.approvalStatus !== 'approved' || partner.isApproved !== true) {
+    //   return res.status(401).json({
+    //     success: false,
+    //     message: `Account is ${partner.approvalStatus || 'pending'}. Please contact admin for approval.`
+    //   });
+    // }
+
+    // Verify password
+    if (!partner.password) {
+      console.log('Partner has no password set');
       return res.status(401).json({
         success: false,
-        message: `Account is ${partner.status}. Please contact admin for approval.`
+        message: 'Password not set for this account. Please reset your password.'
       });
     }
 
-    // Verify password
-    const isPasswordValid = await bcrypt.compare(password, partner.password);
+    // Try password comparison (trim whitespace from input)
+    const trimmedPassword = (password || '').trim();
+    console.log('=== PASSWORD COMPARISON DEBUG ===');
+    console.log('Input password length:', trimmedPassword.length);
+    console.log('Input password (first 3 chars):', trimmedPassword.substring(0, 3));
+    console.log('Stored hash exists:', !!partner.password);
+    console.log('Stored hash length:', partner.password?.length);
+    console.log('Stored hash (first 20 chars):', partner.password?.substring(0, 20));
+    
+    // Compare password (try trimmed first, then original if different)
+    let isPasswordValid = await bcrypt.compare(trimmedPassword, partner.password);
+    console.log('Password comparison result (trimmed):', isPasswordValid);
+    
+    // If trimmed password fails and original is different, try original
+    if (!isPasswordValid && password !== trimmedPassword) {
+      console.log('Trying original password (with spaces)...');
+      isPasswordValid = await bcrypt.compare(password, partner.password);
+      console.log('Password comparison result (original):', isPasswordValid);
+    }
+    
+    // Additional test: Try to hash the input and see if it matches format
+    if (!isPasswordValid) {
+      const testHash = await bcrypt.hash(trimmedPassword, 12);
+      const testCompare = await bcrypt.compare(trimmedPassword, testHash);
+      console.log('Test hash/compare with same password:', testCompare);
+      console.log('Test hash format matches stored:', testHash.substring(0, 7) === partner.password?.substring(0, 7));
+    }
+    
     if (!isPasswordValid) {
       return res.status(401).json({
         success: false,
-        message: 'Invalid email or password'
+        message: 'Invalid email/phone or password'
       });
     }
 
     // Generate JWT token
     const token = jwt.sign(
-      { partnerId: partner._id, email: partner.email, role: 'partner' },
+      { 
+        partnerId: partner._id, 
+        email: partner.email || partner.mobileNumber, 
+        role: 'partner' 
+      },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
@@ -471,20 +593,83 @@ router.post('/login', validatePartnerLogin, async (req, res) => {
     // Remove password from response
     const partnerResponse = partner.toObject();
     delete partnerResponse.password;
+    delete partnerResponse.storePhoto?.data;
+    delete partnerResponse.priceList?.data;
 
+    // Set JWT token in HTTP-only cookie (for web browsers)
+    const cookieOptions = {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production', // HTTPS only in production
+      sameSite: 'strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days in milliseconds
+    };
+
+    res.cookie('partnerToken', token, cookieOptions);
+
+    // Return token in response body as well (for mobile apps)
+    // Mobile apps should store this in secure storage (Keychain/Keystore)
     res.status(200).json({
       success: true,
-      message: 'Login successful',
+      message: 'Login successful. Token stored in cookie (web) and returned in response (mobile).',
       data: {
         partner: partnerResponse,
-        token
+        token // Include token for mobile apps to store securely
       }
     });
   } catch (error) {
     console.error('Partner login error:', error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error during login'
+      message: 'Internal server error during login',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /partners/logout:
+ *   post:
+ *     summary: Logout partner
+ *     description: Clears the authentication cookie
+ *     tags: [Partners]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Logout successful
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: "Logout successful"
+ *       401:
+ *         description: Unauthorized
+ */
+router.post('/logout', authenticateToken, async (req, res) => {
+  try {
+    // Clear the cookie
+    res.clearCookie('partnerToken', {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict'
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Logout successful'
+    });
+  } catch (error) {
+    console.error('Partner logout error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error during logout'
     });
   }
 });
@@ -1122,6 +1307,106 @@ router.put('/bookings/:bookingId/status', authenticateToken, async (req, res) =>
     res.status(500).json({
       success: false,
       message: 'Internal server error while updating booking status'
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /partners/reset-password-test:
+ *   post:
+ *     summary: [TEST ONLY] Reset partner password by mobile number
+ *     description: Temporary endpoint for testing. Resets partner password by mobile number. Remove in production.
+ *     tags: [Partners]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - mobileNumber
+ *               - newPassword
+ *             properties:
+ *               mobileNumber:
+ *                 type: string
+ *                 example: "9876543210"
+ *               newPassword:
+ *                 type: string
+ *                 minLength: 6
+ *                 example: "Test123"
+ *     responses:
+ *       200:
+ *         description: Password reset successfully
+ *       404:
+ *         description: Partner not found
+ */
+router.post('/reset-password-test', async (req, res) => {
+  try {
+    const { mobileNumber, newPassword } = req.body;
+
+    if (!mobileNumber || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Mobile number and new password are required'
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 6 characters long'
+      });
+    }
+
+    // Find partner by mobile number
+    const partner = await Partner.findOne({
+      $or: [
+        { mobileNumber },
+        { phoneNumber: mobileNumber }
+      ]
+    });
+
+    if (!partner) {
+      return res.status(404).json({
+        success: false,
+        message: 'Partner not found with this mobile number'
+      });
+    }
+
+    // Set password as plain text - the pre-save hook will hash it automatically
+    // IMPORTANT: Don't hash it here, the model's pre-save hook will do it
+    const trimmedPassword = newPassword.trim();
+    console.log(`Password reset - Setting plain password, length: ${trimmedPassword.length}`);
+
+    // Set the plain password - the pre-save hook will hash it
+    partner.password = trimmedPassword;
+    await partner.save();
+
+    // Verify it was saved correctly
+    const savedPartner = await Partner.findById(partner._id).select('+password');
+    const verifyAfterSave = await bcrypt.compare(trimmedPassword, savedPartner.password);
+    console.log(`Password reset for partner: ${partner._id}, Mobile: ${mobileNumber}`);
+    console.log(`Password verification after save: ${verifyAfterSave}`);
+    
+    if (!verifyAfterSave) {
+      console.error('WARNING: Password verification failed after save!');
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Password reset successfully. You can now login with the new password.',
+      data: {
+        partnerId: partner._id,
+        mobileNumber: partner.mobileNumber || partner.phoneNumber
+      }
+    });
+  } catch (error) {
+    console.error('Reset password test error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while resetting password',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
