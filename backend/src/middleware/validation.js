@@ -20,7 +20,7 @@ const handleValidationErrors = (req, res, next) => {
 };
 
 /**
- * Validation rules for user registration
+ * Validation rules for user registration (customer)
  */
 const validateRegistration = [
   body('name')
@@ -36,14 +36,67 @@ const validateRegistration = [
     .withMessage('Please provide a valid email address'),
   
   body('phone')
-    .matches(/^\+[1-9]\d{1,14}$/)
-    .withMessage('Please provide a valid phone number with country code (e.g., +919876543210)'),
+    .custom((value) => {
+      // Accept both formats: +919876543210 or 9876543210
+      const normalized = value.replace(/^\+91/, '').replace(/\D/g, '');
+      if (normalized.length === 10 && /^[6-9]/.test(normalized)) {
+        return true;
+      }
+      throw new Error('Please provide a valid 10-digit Indian mobile number (e.g., 9876543210 or +919876543210)');
+    }),
+  
+  body('phoneNumber')
+    .optional()
+    .matches(/^[6-9]\d{9}$/)
+    .withMessage('Please provide a valid 10-digit Indian mobile number starting with 6-9'),
   
   body('password')
     .isLength({ min: 6 })
-    .withMessage('Password must be at least 6 characters long')
-    .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
-    .withMessage('Password must contain at least one lowercase letter, one uppercase letter, and one number'),
+    .withMessage('Password must be at least 6 characters long'),
+  
+  body('gender')
+    .isIn(['male', 'female', 'other'])
+    .withMessage('Gender must be one of: male, female, other'),
+  
+  // Optional fields
+  body('dateOfBirth')
+    .optional()
+    .isISO8601()
+    .withMessage('Date of birth must be a valid date'),
+  
+  body('profilePicture')
+    .optional()
+    .isString()
+    .withMessage('Profile picture must be a string'),
+  
+  body('address.street')
+    .optional()
+    .trim()
+    .isLength({ min: 1, max: 200 })
+    .withMessage('Street address must be between 1 and 200 characters'),
+  
+  body('address.city')
+    .optional()
+    .trim()
+    .isLength({ min: 1, max: 100 })
+    .withMessage('City must be between 1 and 100 characters'),
+  
+  body('address.state')
+    .optional()
+    .trim()
+    .isLength({ min: 1, max: 100 })
+    .withMessage('State must be between 1 and 100 characters'),
+  
+  body('address.pincode')
+    .optional()
+    .trim()
+    .matches(/^\d{6}$/)
+    .withMessage('Pincode must be 6 digits'),
+  
+  body('language')
+    .optional()
+    .isIn(['en', 'hi', 'gu'])
+    .withMessage('Language must be one of: en, hi, gu'),
   
   body('vehicleDetails.make')
     .optional()
@@ -72,23 +125,51 @@ const validateRegistration = [
 ];
 
 /**
- * Validation rules for user login
+ * Validation rules for user login (supports email or phone)
  */
 const validateLogin = [
   body('email')
+    .optional()
     .isEmail()
     .normalizeEmail()
     .withMessage('Please provide a valid email address'),
+  
+  body('phone')
+    .optional()
+    .custom((value) => {
+      // Accept both formats: +919876543210 or 9876543210
+      const normalized = value.replace(/^\+91/, '').replace(/\D/g, '');
+      if (normalized.length === 10 && /^[6-9]/.test(normalized)) {
+        return true;
+      }
+      throw new Error('Please provide a valid 10-digit Indian mobile number');
+    }),
+  
+  body('phoneNumber')
+    .optional()
+    .matches(/^[6-9]\d{9}$/)
+    .withMessage('Please provide a valid 10-digit Indian mobile number starting with 6-9'),
   
   body('password')
     .notEmpty()
     .withMessage('Password is required'),
   
+  // Custom validation: at least one of email, phone, or phoneNumber must be provided
+  body().custom((value) => {
+    const hasEmail = value.email && value.email.trim() !== '';
+    const hasPhone = (value.phone && value.phone.trim() !== '') || (value.phoneNumber && value.phoneNumber.trim() !== '');
+    
+    if (!hasEmail && !hasPhone) {
+      throw new Error('Either email or phone number is required');
+    }
+    return true;
+  }),
+  
   handleValidationErrors
 ];
 
 /**
- * Validation rules for profile updates
+ * Validation rules for customer profile updates
  */
 const validateProfileUpdate = [
   body('name')
@@ -107,14 +188,73 @@ const validateProfileUpdate = [
   
   body('phone')
     .optional()
-    .matches(/^\+[1-9]\d{1,14}$/)
-    .withMessage('Please provide a valid phone number with country code'),
+    .custom((value) => {
+      const normalized = value.replace(/^\+91/, '').replace(/\D/g, '');
+      if (normalized.length === 10 && /^[6-9]/.test(normalized)) {
+        return true;
+      }
+      throw new Error('Please provide a valid 10-digit Indian mobile number');
+    }),
+  
+  body('phoneNumber')
+    .optional()
+    .matches(/^[6-9]\d{9}$/)
+    .withMessage('Please provide a valid 10-digit Indian mobile number'),
+  
+  body('gender')
+    .optional()
+    .isIn(['male', 'female', 'other'])
+    .withMessage('Gender must be one of: male, female, other'),
+  
+  body('dateOfBirth')
+    .optional()
+    .isISO8601()
+    .withMessage('Date of birth must be a valid date'),
+  
+  body('profilePicture')
+    .optional()
+    .isString()
+    .withMessage('Profile picture must be a string'),
   
   body('address')
     .optional()
+    .isObject()
+    .withMessage('Address must be an object'),
+  
+  body('address.street')
+    .optional()
     .trim()
-    .isLength({ min: 5, max: 200 })
-    .withMessage('Address must be between 5 and 200 characters'),
+    .isLength({ min: 1, max: 200 })
+    .withMessage('Street address must be between 1 and 200 characters'),
+  
+  body('address.city')
+    .optional()
+    .trim()
+    .isLength({ min: 1, max: 100 })
+    .withMessage('City must be between 1 and 100 characters'),
+  
+  body('address.state')
+    .optional()
+    .trim()
+    .isLength({ min: 1, max: 100 })
+    .withMessage('State must be between 1 and 100 characters'),
+  
+  body('address.pincode')
+    .optional()
+    .trim()
+    .matches(/^\d{6}$/)
+    .withMessage('Pincode must be 6 digits'),
+  
+  body('address.country')
+    .optional()
+    .trim()
+    .isLength({ min: 1, max: 100 })
+    .withMessage('Country must be between 1 and 100 characters'),
+  
+  body('language')
+    .optional()
+    .isIn(['en', 'hi', 'gu'])
+    .withMessage('Language must be one of: en, hi, gu'),
   
   body('emergencyContacts')
     .optional()
@@ -127,10 +267,20 @@ const validateProfileUpdate = [
     .isLength({ min: 2, max: 50 })
     .withMessage('Emergency contact name must be between 2 and 50 characters'),
   
+  body('emergencyContacts.*.phoneNumber')
+    .optional()
+    .matches(/^[6-9]\d{9}$/)
+    .withMessage('Emergency contact phone must be a valid 10-digit Indian mobile number'),
+  
   body('emergencyContacts.*.phone')
     .optional()
-    .matches(/^\+[1-9]\d{1,14}$/)
-    .withMessage('Emergency contact phone must be a valid phone number with country code'),
+    .custom((value) => {
+      const normalized = value.replace(/^\+91/, '').replace(/\D/g, '');
+      if (normalized.length === 10 && /^[6-9]/.test(normalized)) {
+        return true;
+      }
+      throw new Error('Emergency contact phone must be a valid 10-digit Indian mobile number');
+    }),
   
   body('emergencyContacts.*.relationship')
     .optional()
@@ -232,17 +382,93 @@ const validatePartnerRegistration = [
     .isURL()
     .withMessage('Google Maps link must be a valid URL'),
   
+  // Custom validation: Either tyreBrands or tyreIds must be provided
   body('tyreBrands')
-    .notEmpty()
-    .withMessage('Tyre brands are required'),
+    .optional()
+    .custom((value, { req }) => {
+      const hasTyreBrands = value && (
+        (Array.isArray(value) && value.length > 0) ||
+        (typeof value === 'string' && value.trim() !== '')
+      );
+      
+      const hasTyreIds = req.body.tyreIds && (
+        (Array.isArray(req.body.tyreIds) && req.body.tyreIds.length > 0) ||
+        (typeof req.body.tyreIds === 'string' && req.body.tyreIds.trim() !== '')
+      );
+      
+      // At least one must be provided
+      if (!hasTyreBrands && !hasTyreIds) {
+        throw new Error('Either tyreBrands or tyreIds is required');
+      }
+      
+      // If tyreBrands is provided, validate format
+      if (hasTyreBrands) {
+        if (Array.isArray(value)) {
+          const validBrands = ['MRF', 'Apollo', 'CEAT', 'Michelin', 'JK Tyre', 'Other'];
+          for (const brand of value) {
+            if (brand && !validBrands.includes(brand)) {
+              throw new Error(`Invalid tyre brand: ${brand}. Allowed: ${validBrands.join(', ')}`);
+            }
+          }
+        } else if (typeof value === 'string') {
+          const brands = value.split(',').map(b => b.trim()).filter(b => b);
+          if (brands.length === 0) {
+            throw new Error('Tyre brands string cannot be empty');
+          }
+          const validBrands = ['MRF', 'Apollo', 'CEAT', 'Michelin', 'JK Tyre', 'Other'];
+          for (const brand of brands) {
+            if (!validBrands.includes(brand)) {
+              throw new Error(`Invalid tyre brand: ${brand}. Allowed: ${validBrands.join(', ')}`);
+            }
+          }
+        }
+      }
+      
+      return true;
+    }),
   
-  body('tyreBrands')
-    .isArray({ min: 1 })
-    .withMessage('Tyre brands must be a non-empty array'),
-  
-  body('tyreBrands.*')
-    .isIn(['MRF', 'Apollo', 'CEAT', 'Michelin', 'JK Tyre', 'Other'])
-    .withMessage('Invalid tyre brand. Allowed: MRF, Apollo, CEAT, Michelin, JK Tyre, Other'),
+  body('tyreIds')
+    .optional()
+    .custom((value, { req }) => {
+      const hasTyreBrands = req.body.tyreBrands && (
+        (Array.isArray(req.body.tyreBrands) && req.body.tyreBrands.length > 0) ||
+        (typeof req.body.tyreBrands === 'string' && req.body.tyreBrands.trim() !== '')
+      );
+      
+      const hasTyreIds = value && (
+        (Array.isArray(value) && value.length > 0) ||
+        (typeof value === 'string' && value.trim() !== '')
+      );
+      
+      // At least one must be provided
+      if (!hasTyreBrands && !hasTyreIds) {
+        throw new Error('Either tyreBrands or tyreIds is required');
+      }
+      
+      // If tyreIds is provided, validate format
+      if (hasTyreIds) {
+        let idsArray = [];
+        if (Array.isArray(value)) {
+          idsArray = value;
+        } else if (typeof value === 'string') {
+          try {
+            idsArray = JSON.parse(value);
+          } catch (e) {
+            idsArray = value.split(',').map(id => id.trim()).filter(id => id);
+          }
+        }
+        
+        // Validate each ID is a valid MongoDB ObjectId
+        const mongoIdRegex = /^[0-9a-fA-F]{24}$/;
+        for (const id of idsArray) {
+          if (!mongoIdRegex.test(id)) {
+            throw new Error(`Invalid tyre ID format: ${id}`);
+          }
+        }
+      }
+      
+      return true;
+    }),
   
   // Legacy fields (optional for backward compatibility)
   body('businessName')
@@ -285,15 +511,30 @@ const validatePartnerRegistration = [
     .isFloat({ min: -180, max: 180 })
     .withMessage('Longitude must be between -180 and 180'),
   
+  body('serviceIds')
+    .optional()
+    .isArray({ min: 0 })
+    .withMessage('Service IDs must be an array'),
+  
+  body('serviceIds.*')
+    .optional()
+    .isMongoId()
+    .withMessage('Invalid service ID format'),
+  
   body('services')
     .optional()
     .isArray()
     .withMessage('Services must be an array'),
   
-  body('services.*')
+  body('services.*.serviceId')
     .optional()
     .isMongoId()
-    .withMessage('Invalid service ID format'),
+    .withMessage('Invalid service ID format in services array'),
+  
+  body('services.*.price')
+    .optional()
+    .isFloat({ min: 0 })
+    .withMessage('Service price must be a positive number'),
   
   body('businessHours')
     .optional()
@@ -343,6 +584,18 @@ const validatePartnerLogin = [
  * Validation rules for partner profile updates
  */
 const validatePartnerProfileUpdate = [
+  body('shopName')
+    .optional()
+    .trim()
+    .isLength({ min: 2, max: 100 })
+    .withMessage('Shop name must be between 2 and 100 characters'),
+  
+  body('ownerName')
+    .optional()
+    .trim()
+    .isLength({ min: 2, max: 100 })
+    .withMessage('Owner name must be between 2 and 100 characters'),
+  
   body('businessName')
     .optional()
     .trim()
@@ -355,16 +608,82 @@ const validatePartnerProfileUpdate = [
     .normalizeEmail()
     .withMessage('Please provide a valid email address'),
   
+  body('mobileNumber')
+    .optional()
+    .matches(/^[6-9]\d{9}$/)
+    .withMessage('Please provide a valid 10-digit Indian mobile number'),
+  
+  body('whatsappNumber')
+    .optional()
+    .matches(/^[6-9]\d{9}$/)
+    .withMessage('Please provide a valid 10-digit WhatsApp number'),
+  
   body('phone')
     .optional()
-    .matches(/^\+[1-9]\d{1,14}$/)
-    .withMessage('Please provide a valid phone number with country code'),
+    .custom((value) => {
+      const normalized = value.replace(/^\+91/, '').replace(/\D/g, '');
+      if (normalized.length === 10 && /^[6-9]/.test(normalized)) {
+        return true;
+      }
+      throw new Error('Please provide a valid 10-digit Indian mobile number');
+    }),
+  
+  body('shopAddress')
+    .optional()
+    .trim()
+    .isLength({ min: 10, max: 500 })
+    .withMessage('Shop address must be between 10 and 500 characters'),
+  
+  body('googleMapsLink')
+    .optional()
+    .trim()
+    .isURL()
+    .withMessage('Google Maps link must be a valid URL'),
+  
+  body('tyreBrands')
+    .optional()
+    .isArray()
+    .withMessage('Tyre brands must be an array'),
+  
+  body('tyreBrands.*')
+    .optional()
+    .isIn(['MRF', 'Apollo', 'CEAT', 'Michelin', 'JK Tyre', 'Other'])
+    .withMessage('Invalid tyre brand'),
   
   body('address')
     .optional()
+    .isObject()
+    .withMessage('Address must be an object'),
+  
+  body('address.street')
+    .optional()
     .trim()
-    .isLength({ min: 10, max: 200 })
-    .withMessage('Address must be between 10 and 200 characters'),
+    .isLength({ min: 1, max: 200 })
+    .withMessage('Street address must be between 1 and 200 characters'),
+  
+  body('address.city')
+    .optional()
+    .trim()
+    .isLength({ min: 1, max: 100 })
+    .withMessage('City must be between 1 and 100 characters'),
+  
+  body('address.state')
+    .optional()
+    .trim()
+    .isLength({ min: 1, max: 100 })
+    .withMessage('State must be between 1 and 100 characters'),
+  
+  body('address.pincode')
+    .optional()
+    .trim()
+    .matches(/^\d{6}$/)
+    .withMessage('Pincode must be 6 digits'),
+  
+  body('businessDescription')
+    .optional()
+    .trim()
+    .isLength({ min: 10, max: 500 })
+    .withMessage('Business description must be between 10 and 500 characters'),
   
   body('description')
     .optional()
@@ -374,8 +693,13 @@ const validatePartnerProfileUpdate = [
   
   body('businessHours')
     .optional()
-    .isObject()
-    .withMessage('Business hours must be an object'),
+    .isArray()
+    .withMessage('Business hours must be an array'),
+  
+  body('businessType')
+    .optional()
+    .isIn(['garage', 'tire_shop', 'petrol_pump', 'ev_charging', 'battery_swap', 'car_wash', 'towing', 'emergency_service', 'other'])
+    .withMessage('Invalid business type'),
   
   handleValidationErrors
 ];

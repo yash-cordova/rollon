@@ -3,25 +3,10 @@ const multer = require('multer');
 // Configure multer to store files in memory (as Buffer) for MongoDB
 const storage = multer.memoryStorage();
 
-// File filter to allow only images and PDFs
+// File filter to allow all file types (no content type restriction)
 const fileFilter = (req, file, cb) => {
-  // Allowed MIME types
-  const allowedMimeTypes = [
-    'image/jpeg',
-    'image/jpg',
-    'image/png',
-    'image/gif',
-    'image/webp',
-    'application/pdf',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
-    'application/vnd.ms-excel' // .xls
-  ];
-
-  if (allowedMimeTypes.includes(file.mimetype)) {
-    cb(null, true);
-  } else {
-    cb(new Error(`Invalid file type. Allowed types: ${allowedMimeTypes.join(', ')}`), false);
-  }
+  // Accept all file types
+  cb(null, true);
 };
 
 // Configure multer

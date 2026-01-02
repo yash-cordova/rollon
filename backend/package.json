@@ -8,7 +8,11 @@
     "dev": "nodemon src/server.js",
     "test": "jest",
     "lint": "eslint src/",
-    "seed": "node src/scripts/seed.js"
+    "seed": "node src/scripts/seed.js",
+    "create-admin": "node src/scripts/create-admin.js",
+    "seed-services-tyres": "node src/scripts/seed-services-tyres.js",
+    "clear-services-tyres": "node src/scripts/clear-services-tyres.js",
+    "seed-service-calls": "node src/scripts/seed-service-calls.js"
   },
   "keywords": [
     "vehicle-service",

@@ -2,8 +2,10 @@ const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 const Partner = require('../models/Partner');
 const Service = require('../models/Service');
+const Tyre = require('../models/Tyre');
 const Booking = require('../models/Booking');
 const { authenticateToken } = require('../middleware/auth');
 const { validatePartnerRegistration, validatePartnerLogin, validatePartnerProfileUpdate, validateServiceAdd } = require('../middleware/validation');
@@ -93,12 +95,23 @@ const { uploadPartnerFiles, handleUploadError } = require('../middleware/upload'
  *                 example: "https://maps.google.com/?q=23.0225,72.5714"
  *               tyreBrands:
  *                 type: array
- *                 description: વેચાતા ટાયર બ્રાન્ડ / बेचे जाने वाले टायर ब्रांड (Tyre Brands Sold) - Required, at least one brand. Can be array or comma-separated string
- *                 minItems: 1
+ *                 description: વેચાતા ટાયર બ્રાન્ડ / बेचे जाने वाले टायर ब्रांड (Tyre Brands Sold) - Optional if tyreIds provided, otherwise required. Can be array or comma-separated string
  *                 items:
  *                   type: string
  *                   enum: [MRF, Apollo, CEAT, Michelin, JK Tyre, Other]
  *                 example: ["MRF", "Apollo", "CEAT"]
+ *               tyreIds:
+ *                 type: array
+ *                 description: Array of tyre IDs (Optional if tyreBrands provided, otherwise required - brands will be extracted automatically)
+ *                 items:
+ *                   type: string
+ *                   format: mongoId
+ *                 example: ["507f1f77bcf86cd799439015", "507f1f77bcf86cd799439016"]
+ *               googleMapsLink:
+ *                 type: string
+ *                 format: uri
+ *                 description: Google Maps Location Link (Optional) - Will extract coordinates automatically. Supported formats: https://maps.google.com/?q=lat,lng or https://www.google.com/maps/place/.../@lat,lng
+ *                 example: "https://maps.google.com/?q=23.0225,72.5714"
  *               storePhoto:
  *                 type: string
  *                 format: binary
@@ -115,6 +128,26 @@ const { uploadPartnerFiles, handleUploadError } = require('../middleware/upload'
  *                 minLength: 6
  *                 description: Password (must contain at least one uppercase letter, one lowercase letter, and one number)
  *                 example: "Password123"
+ *               serviceIds:
+ *                 type: array
+ *                 description: Array of service IDs to add during registration (Optional)
+ *                 items:
+ *                   type: string
+ *                   format: mongoId
+ *                 example: ["507f1f77bcf86cd799439013", "507f1f77bcf86cd799439014"]
+ *               services:
+ *                 type: array
+ *                 description: Array of services with custom prices (Optional - alternative to serviceIds)
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     serviceId:
+ *                       type: string
+ *                       format: mongoId
+ *                     price:
+ *                       type: number
+ *                     description:
+ *                       type: string
  *     responses:
  *       201:
  *         description: Partner registered successfully. Account is pending admin approval.
@@ -204,6 +237,7 @@ router.post('/register', uploadPartnerFiles, handleUploadError, validatePartnerR
       shopAddress, 
       googleMapsLink, 
       tyreBrands,
+      tyreIds, // New: Accept tyre IDs array
       // Legacy fields (optional)
       businessName,
       email,
@@ -213,6 +247,7 @@ router.post('/register', uploadPartnerFiles, handleUploadError, validatePartnerR
       latitude,
       longitude,
       services,
+      serviceIds, // New: Accept service IDs array
       businessHours
     } = req.body;
 
@@ -241,11 +276,21 @@ router.post('/register', uploadPartnerFiles, handleUploadError, validatePartnerR
       });
     }
 
-    // Validate tyre brands (required)
-    if (!tyreBrands || (Array.isArray(tyreBrands) && tyreBrands.length === 0) || (typeof tyreBrands === 'string' && tyreBrands.trim() === '')) {
+    // Validate that either tyreBrands or tyreIds is provided
+    const hasTyreBrands = tyreBrands && (
+      (Array.isArray(tyreBrands) && tyreBrands.length > 0) ||
+      (typeof tyreBrands === 'string' && tyreBrands.trim() !== '')
+    );
+    
+    const hasTyreIds = tyreIds && (
+      (Array.isArray(tyreIds) && tyreIds.length > 0) ||
+      (typeof tyreIds === 'string' && tyreIds.trim() !== '')
+    );
+    
+    if (!hasTyreBrands && !hasTyreIds) {
       return res.status(400).json({
         success: false,
-        message: 'At least one tyre brand is required'
+        message: 'Either tyreBrands or tyreIds is required'
       });
     }
 
@@ -292,11 +337,68 @@ router.post('/register', uploadPartnerFiles, handleUploadError, validatePartnerR
       parsedTyreBrands = tyreBrands.split(',').map(brand => brand.trim()).filter(brand => brand !== '');
     }
 
-    // Validate parsed tyre brands
+    // Process tyre IDs if provided
+    // Handle both array format and single value from multipart/form-data
+    let tyreIdsArray = [];
+    if (tyreIds) {
+      if (Array.isArray(tyreIds)) {
+        tyreIdsArray = tyreIds;
+      } else if (typeof tyreIds === 'string') {
+        // Handle comma-separated string or JSON array string
+        try {
+          tyreIdsArray = JSON.parse(tyreIds);
+        } catch (e) {
+          // If not JSON, treat as comma-separated
+          tyreIdsArray = tyreIds.split(',').map(id => id.trim()).filter(id => id);
+        }
+      }
+    }
+
+    // Process tyre IDs if provided - store full tyre objects
+    let partnerTyres = [];
+    if (tyreIdsArray.length > 0) {
+      const validTyres = await Tyre.find({
+        _id: { $in: tyreIdsArray },
+        isActive: true
+      });
+
+      if (validTyres.length !== tyreIdsArray.length) {
+        return res.status(400).json({
+          success: false,
+          message: 'One or more tyre IDs are invalid or inactive'
+        });
+      }
+
+      // Create tyres array with full tyre details (similar to services)
+      // tyre._id is already an ObjectId from Mongoose, use it directly
+      partnerTyres = validTyres.map(tyre => ({
+        tyreId: tyre._id, // Already an ObjectId
+        name: tyre.name,
+        brand: tyre.brand,
+        model: tyre.model || '',
+        price: tyre.basePrice, // Use tyre base price as default
+        currency: tyre.currency || 'INR',
+        isAvailable: true,
+        vehicleType: tyre.vehicleType,
+        size: tyre.size || {}
+      }));
+
+      // Extract unique brands from tyres for tyreBrands field
+      const brandsFromTyres = [...new Set(validTyres.map(tyre => tyre.brand))];
+      
+      // Merge with provided tyre brands (if any)
+      if (parsedTyreBrands.length > 0) {
+        parsedTyreBrands = [...new Set([...parsedTyreBrands, ...brandsFromTyres])];
+      } else {
+        parsedTyreBrands = brandsFromTyres;
+      }
+    }
+
+    // Validate parsed tyre brands (required - either from tyreBrands or tyreIds)
     if (parsedTyreBrands.length === 0) {
       return res.status(400).json({
         success: false,
-        message: 'At least one valid tyre brand is required'
+        message: 'At least one valid tyre brand is required (provide tyreBrands or tyreIds)'
       });
     }
 
@@ -323,6 +425,72 @@ router.post('/register', uploadPartnerFiles, handleUploadError, validatePartnerR
       };
     }
 
+    // Process service IDs if provided
+    // Handle both array format and single value from multipart/form-data
+    let serviceIdsArray = [];
+    if (serviceIds) {
+      if (Array.isArray(serviceIds)) {
+        serviceIdsArray = serviceIds;
+      } else if (typeof serviceIds === 'string') {
+        // Handle comma-separated string or JSON array string
+        try {
+          serviceIdsArray = JSON.parse(serviceIds);
+        } catch (e) {
+          // If not JSON, treat as comma-separated
+          serviceIdsArray = serviceIds.split(',').map(id => id.trim()).filter(id => id);
+        }
+      }
+    }
+
+    let partnerServices = [];
+    if (serviceIdsArray.length > 0) {
+      // Validate service IDs and get service details
+      const validServices = await Service.find({
+        _id: { $in: serviceIdsArray },
+        isActive: true,
+        isApproved: true
+      });
+
+      if (validServices.length !== serviceIdsArray.length) {
+        return res.status(400).json({
+          success: false,
+          message: 'One or more service IDs are invalid or inactive'
+        });
+      }
+
+      // Create services array with serviceId and basePrice
+      // service._id is already an ObjectId from Mongoose, use it directly
+      partnerServices = validServices.map(service => ({
+        serviceId: service._id, // Already an ObjectId
+        name: service.name,
+        description: service.description || '',
+        price: service.basePrice, // Use service base price as default
+        currency: service.currency || 'INR',
+        isAvailable: true,
+        estimatedTime: service.estimatedDuration || 60,
+        category: service.category
+      }));
+    } else if (services && Array.isArray(services) && services.length > 0) {
+      // Legacy format: services array with serviceId and price
+      for (const serviceItem of services) {
+        if (serviceItem.serviceId) {
+          const service = await Service.findById(serviceItem.serviceId);
+          if (service && service.isActive && service.isApproved) {
+            partnerServices.push({
+              serviceId: service._id,
+              name: service.name,
+              description: serviceItem.description || service.description || '',
+              price: serviceItem.price || service.basePrice,
+              currency: serviceItem.currency || service.currency || 'INR',
+              isAvailable: serviceItem.isAvailable !== undefined ? serviceItem.isAvailable : true,
+              estimatedTime: serviceItem.estimatedTime || service.estimatedDuration || 60,
+              category: service.category
+            });
+          }
+        }
+      }
+    }
+
     // Create new partner with new fields
     // NOTE: Set password as plain text - the Partner model's pre-save hook will hash it automatically
     const partnerData = {
@@ -333,6 +501,7 @@ router.post('/register', uploadPartnerFiles, handleUploadError, validatePartnerR
       shopAddress,
       password: password.trim(), // Plain password - pre-save hook will hash it
       tyreBrands: parsedTyreBrands,
+      ...(partnerTyres.length > 0 && { tyres: partnerTyres }), // Store full tyre objects if provided
       storePhoto: storePhotoData,
       priceList: priceListData,
       ...(googleMapsLink && { googleMapsLink }),
@@ -343,14 +512,35 @@ router.post('/register', uploadPartnerFiles, handleUploadError, validatePartnerR
       ...(phone && { phoneNumber: phone }),
       name: ownerName, // Map ownerName to name for legacy
       ...(address && { address }),
-      ...(services && { services }),
+      ...(partnerServices.length > 0 && { services: partnerServices }),
       ...(businessHours && { businessHours }),
       businessType: 'tire_shop', // Default for tire shop registration
       approvalStatus: 'pending' // Default status, requires admin approval
     };
 
+    // Debug: Log what we're about to save
+    console.log('Partner services to save:', JSON.stringify(partnerServices.map(s => ({
+      serviceId: s.serviceId?.toString(),
+      name: s.name
+    })), null, 2));
+    console.log('Partner tyres to save:', JSON.stringify(partnerTyres.map(t => ({
+      tyreId: t.tyreId?.toString(),
+      name: t.name
+    })), null, 2));
+    
     const partner = new Partner(partnerData);
     await partner.save();
+    
+    // Debug: Verify what was actually saved
+    const savedPartner = await Partner.findById(partner._id).select('services tyres');
+    console.log('Saved partner services:', JSON.stringify(savedPartner.services?.map(s => ({
+      serviceId: s.serviceId?.toString(),
+      name: s.name
+    })), null, 2));
+    console.log('Saved partner tyres:', JSON.stringify(savedPartner.tyres?.map(t => ({
+      tyreId: t.tyreId?.toString(),
+      name: t.name
+    })), null, 2));
 
     // Remove sensitive data from response
     const partnerResponse = partner.toObject();
@@ -522,14 +712,24 @@ router.post('/login', validatePartnerLogin, async (req, res) => {
 
     console.log('Partner found:', partner._id, 'Mobile:', partner.mobileNumber || partner.phoneNumber, 'Has password:', !!partner.password);
 
-    // Check if partner is approved
-    // COMMENTED OUT: Allow login regardless of approval status for now
-    // if (partner.approvalStatus !== 'approved' || partner.isApproved !== true) {
-    //   return res.status(401).json({
-    //     success: false,
-    //     message: `Account is ${partner.approvalStatus || 'pending'}. Please contact admin for approval.`
-    //   });
-    // }
+    // Check if partner is approved - REQUIRED for login
+    if (partner.approvalStatus !== 'approved' || partner.isApproved !== true) {
+      const status = partner.approvalStatus || 'pending';
+      let message = 'Your account is pending admin approval. Please wait for approval before logging in.';
+      
+      if (status === 'rejected') {
+        message = 'Your account has been rejected. Please contact admin for more information.';
+      } else if (status === 'suspended') {
+        message = 'Your account has been suspended. Please contact admin for assistance.';
+      }
+      
+      return res.status(403).json({
+        success: false,
+        message: message,
+        approvalStatus: status,
+        isApproved: partner.isApproved
+      });
+    }
 
     // Verify password
     if (!partner.password) {
@@ -713,7 +913,8 @@ router.get('/profile', authenticateToken, async (req, res) => {
     }
 
     const partner = await Partner.findById(req.user.partnerId)
-      .populate('services.serviceId', 'name description category');
+      .populate('services.serviceId', 'name description category')
+      .populate('tyres.tyreId', 'name brand model size vehicleType basePrice');
     
     if (!partner) {
       return res.status(404).json({
@@ -750,6 +951,12 @@ router.get('/profile', authenticateToken, async (req, res) => {
  *           schema:
  *             type: object
  *             properties:
+ *               shopName:
+ *                 type: string
+ *                 example: "ABC Tire Shop"
+ *               ownerName:
+ *                 type: string
+ *                 example: "Rajesh Kumar"
  *               businessName:
  *                 type: string
  *                 example: "ABC Auto Service"
@@ -757,27 +964,62 @@ router.get('/profile', authenticateToken, async (req, res) => {
  *                 type: string
  *                 format: email
  *                 example: "service@abcauto.com"
+ *               mobileNumber:
+ *                 type: string
+ *                 example: "9876543210"
+ *               whatsappNumber:
+ *                 type: string
+ *                 example: "9876543210"
  *               phone:
  *                 type: string
- *                 example: "+919876543211"
- *               address:
+ *                 example: "9876543210"
+ *               shopAddress:
  *                 type: string
- *                 example: "123 Service Road, Delhi"
+ *                 example: "123 Main Street, Ahmedabad"
+ *               googleMapsLink:
+ *                 type: string
+ *                 example: "https://maps.google.com/?q=23.0225,72.5714"
+ *               tyreBrands:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                   enum: [MRF, Apollo, CEAT, Michelin, JK Tyre, Other]
+ *                 example: ["MRF", "Apollo"]
+ *               address:
+ *                 type: object
+ *                 properties:
+ *                   street:
+ *                     type: string
+ *                   city:
+ *                     type: string
+ *                   state:
+ *                     type: string
+ *                   pincode:
+ *                     type: string
+ *                   country:
+ *                     type: string
+ *               businessDescription:
+ *                 type: string
+ *                 example: "Professional auto service center"
  *               description:
  *                 type: string
  *                 example: "Professional auto service center"
+ *               businessType:
+ *                 type: string
+ *                 enum: [garage, tire_shop, petrol_pump, ev_charging, battery_swap, car_wash, towing, emergency_service, other]
  *               businessHours:
- *                 type: object
- *                 properties:
- *                   monday:
- *                     type: object
- *                     properties:
- *                       open:
- *                         type: string
- *                         example: "09:00"
- *                       close:
- *                         type: string
- *                         example: "18:00"
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     day:
+ *                       type: string
+ *                     isOpen:
+ *                       type: boolean
+ *                     openTime:
+ *                       type: string
+ *                     closeTime:
+ *                       type: string
  *     responses:
  *       200:
  *         description: Profile updated successfully
@@ -809,7 +1051,7 @@ router.get('/profile', authenticateToken, async (req, res) => {
  */
 router.put('/profile', authenticateToken, validatePartnerProfileUpdate, async (req, res) => {
   try {
-    // Verify partner role
+    // Verify partner role - JWT verification is required
     if (req.user.role !== 'partner') {
       return res.status(403).json({
         success: false,
@@ -817,12 +1059,40 @@ router.put('/profile', authenticateToken, validatePartnerProfileUpdate, async (r
       });
     }
 
-    const { businessName, email, phone, address, description, businessHours } = req.body;
+    const { 
+      shopName, 
+      ownerName, 
+      businessName, 
+      email, 
+      phone, 
+      mobileNumber, 
+      whatsappNumber,
+      shopAddress,
+      googleMapsLink,
+      tyreBrands,
+      address,
+      businessDescription,
+      description,
+      businessHours,
+      businessType
+    } = req.body;
+    
     const partnerId = req.user.partnerId;
+
+    // Normalize phone numbers if provided
+    let normalizedMobile = mobileNumber || phone;
+    if (normalizedMobile && normalizedMobile.startsWith('+')) {
+      normalizedMobile = normalizedMobile.replace(/^\+91/, '').replace(/\D/g, '');
+    } else if (normalizedMobile) {
+      normalizedMobile = normalizedMobile.replace(/\D/g, '');
+    }
 
     // Check if email is already taken by another partner
     if (email) {
-      const existingPartner = await Partner.findOne({ email, _id: { $ne: partnerId } });
+      const existingPartner = await Partner.findOne({ 
+        email: email.toLowerCase().trim(), 
+        _id: { $ne: partnerId } 
+      });
       if (existingPartner) {
         return res.status(409).json({
           success: false,
@@ -831,30 +1101,85 @@ router.put('/profile', authenticateToken, validatePartnerProfileUpdate, async (r
       }
     }
 
-    // Check if phone is already taken by another partner
-    if (phone) {
-      const existingPartner = await Partner.findOne({ phone, _id: { $ne: partnerId } });
+    // Check if mobile number is already taken by another partner
+    if (normalizedMobile && normalizedMobile.match(/^[6-9]\d{9}$/)) {
+      const existingPartner = await Partner.findOne({ 
+        $or: [
+          { mobileNumber: normalizedMobile },
+          { phoneNumber: normalizedMobile }
+        ],
+        _id: { $ne: partnerId } 
+      });
       if (existingPartner) {
         return res.status(409).json({
           success: false,
-          message: 'Phone number already taken by another partner'
+          message: 'Mobile number already taken by another partner'
         });
+      }
+    }
+
+    // Check if WhatsApp number is already taken by another partner
+    if (whatsappNumber) {
+      const normalizedWhatsApp = whatsappNumber.replace(/\D/g, '');
+      if (normalizedWhatsApp.match(/^[6-9]\d{9}$/)) {
+        const existingPartner = await Partner.findOne({ 
+          whatsappNumber: normalizedWhatsApp,
+          _id: { $ne: partnerId } 
+        });
+        if (existingPartner) {
+          return res.status(409).json({
+            success: false,
+            message: 'WhatsApp number already taken by another partner'
+          });
+        }
+      }
+    }
+
+    // Build update object
+    const updateData = {};
+    
+    if (shopName) updateData.shopName = shopName.trim();
+    if (ownerName) updateData.ownerName = ownerName.trim();
+    if (businessName) updateData.businessName = businessName.trim();
+    if (email) updateData.email = email.toLowerCase().trim();
+    if (normalizedMobile && normalizedMobile.match(/^[6-9]\d{9}$/)) {
+      updateData.mobileNumber = normalizedMobile;
+    }
+    if (whatsappNumber) {
+      const normalizedWhatsApp = whatsappNumber.replace(/\D/g, '');
+      if (normalizedWhatsApp.match(/^[6-9]\d{9}$/)) {
+        updateData.whatsappNumber = normalizedWhatsApp;
+      }
+    }
+    if (shopAddress) updateData.shopAddress = shopAddress.trim();
+    if (googleMapsLink) updateData.googleMapsLink = googleMapsLink.trim();
+    if (tyreBrands && Array.isArray(tyreBrands)) {
+      updateData.tyreBrands = tyreBrands.filter(brand => 
+        ['MRF', 'Apollo', 'CEAT', 'Michelin', 'JK Tyre', 'Other'].includes(brand)
+      );
+    }
+    if (address) updateData.address = address;
+    if (businessDescription) updateData.businessDescription = businessDescription.trim();
+    if (description) updateData.businessDescription = description.trim(); // Map description to businessDescription
+    if (businessHours && Array.isArray(businessHours)) updateData.businessHours = businessHours;
+    if (businessType) updateData.businessType = businessType;
+
+    // Extract coordinates from Google Maps link if provided
+    if (googleMapsLink) {
+      const coordMatch = googleMapsLink.match(/@(-?\d+\.?\d*),(-?\d+\.?\d*)/) || 
+                        googleMapsLink.match(/q=(-?\d+\.?\d*),(-?\d+\.?\d*)/);
+      if (coordMatch) {
+        updateData.location = {
+          type: 'Point',
+          coordinates: [parseFloat(coordMatch[2]), parseFloat(coordMatch[1])] // [longitude, latitude]
+        };
       }
     }
 
     // Update partner profile
     const updatedPartner = await Partner.findByIdAndUpdate(
       partnerId,
-      {
-        $set: {
-          ...(businessName && { businessName }),
-          ...(email && { email }),
-          ...(phone && { phone }),
-          ...(address && { address }),
-          ...(description && { description }),
-          ...(businessHours && { businessHours })
-        }
-      },
+      { $set: updateData },
       { new: true, runValidators: true }
     );
 
@@ -865,16 +1190,33 @@ router.put('/profile', authenticateToken, validatePartnerProfileUpdate, async (r
       });
     }
 
+    // Remove sensitive data from response
+    const partnerResponse = updatedPartner.toObject();
+    delete partnerResponse.password;
+    delete partnerResponse.storePhoto?.data;
+    delete partnerResponse.priceList?.data;
+
     res.status(200).json({
       success: true,
       message: 'Profile updated successfully',
-      data: updatedPartner
+      data: partnerResponse
     });
   } catch (error) {
     console.error('Update partner profile error:', error);
+    
+    // Handle duplicate key error
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern)[0];
+      return res.status(409).json({
+        success: false,
+        message: `${field} already exists`
+      });
+    }
+
     res.status(500).json({
       success: false,
-      message: 'Internal server error while updating profile'
+      message: 'Internal server error while updating profile',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -920,7 +1262,8 @@ router.get('/services', authenticateToken, async (req, res) => {
     }
 
     const partner = await Partner.findById(req.user.partnerId)
-      .populate('services.serviceId', 'name description category price');
+      .populate('services.serviceId', 'name description category price')
+      .populate('tyres.tyreId', 'name brand model size vehicleType basePrice');
     
     if (!partner) {
       return res.status(404).json({
@@ -1406,6 +1749,147 @@ router.post('/reset-password-test', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Internal server error while resetting password',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /partners:
+ *   get:
+ *     summary: Get list of partners (Public API - No Auth Required)
+ *     description: Get all approved partners or filter by serviceId. If serviceId is provided, returns only partners offering that service.
+ *     tags: [Partners]
+ *     parameters:
+ *       - in: query
+ *         name: serviceId
+ *         schema:
+ *           type: string
+ *         description: Optional - Filter partners by service ID. If not provided, returns all approved partners.
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *         description: Page number
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *         description: Number of items per page
+ *     responses:
+ *       200:
+ *         description: Partners retrieved successfully
+ *       400:
+ *         description: Invalid service ID format
+ */
+router.get('/', async (req, res) => {
+  try {
+    const { serviceId, page = 1, limit = 20 } = req.query;
+
+    // Build query - only approved partners
+    const query = {
+      approvalStatus: 'approved',
+      isApproved: true
+    };
+
+    // If serviceId provided, filter by it
+    if (serviceId) {
+      // Validate service ID format
+      if (!serviceId.match(/^[0-9a-fA-F]{24}$/)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid service ID format'
+        });
+      }
+
+      // Check if service exists
+      const service = await Service.findById(serviceId);
+      if (!service || !service.isActive) {
+        return res.status(404).json({
+          success: false,
+          message: 'Service not found or inactive'
+        });
+      }
+
+      // Filter partners that have this serviceId in their services array
+      // serviceId is stored as ObjectId in the database (from service._id during registration)
+      const serviceObjectId = new mongoose.Types.ObjectId(serviceId);
+      
+      // Add service filter to existing query
+      query['services.serviceId'] = serviceObjectId;
+    }
+
+    // Pagination
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    // Debug logging
+    console.log('Query:', JSON.stringify(query, null, 2));
+    
+    // Get total count
+    const total = await Partner.countDocuments(query);
+    console.log('Total partners found:', total);
+    
+    // Debug: Check a sample partner to see how serviceId is stored
+    const samplePartner = await Partner.findOne({ 
+      approvalStatus: 'approved', 
+      isApproved: true,
+      'services.0': { $exists: true }
+    }).select('services');
+    if (samplePartner && samplePartner.services && samplePartner.services.length > 0) {
+      console.log('Sample partner serviceId type:', typeof samplePartner.services[0].serviceId);
+      console.log('Sample partner serviceId:', samplePartner.services[0].serviceId);
+      console.log('Sample partner serviceId toString:', samplePartner.services[0].serviceId?.toString());
+    }
+
+    // Get partners with pagination
+    const partners = await Partner.find(query)
+      .select('-password -storePhoto.data -priceList.data')
+      .populate('services.serviceId', 'name description category basePrice estimatedDuration')
+      .populate('tyres.tyreId', 'name brand model size vehicleType basePrice')
+      .sort({ rating: -1, createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum);
+
+    // If serviceId provided, filter services array to only show the matching service
+    let filteredPartners = partners;
+    if (serviceId) {
+      filteredPartners = partners.map(partner => {
+        const partnerObj = partner.toObject();
+        if (partnerObj.services && Array.isArray(partnerObj.services)) {
+          partnerObj.services = partnerObj.services.filter(s => 
+            s.serviceId && (s.serviceId._id?.toString() === serviceId || s.serviceId.toString() === serviceId)
+          );
+        }
+        return partnerObj;
+      });
+    }
+
+    const pages = Math.ceil(total / limitNum);
+
+    res.status(200).json({
+      success: true,
+      message: serviceId ? 'Partners offering the specified service retrieved successfully' : 'Partners retrieved successfully',
+      data: filteredPartners,
+      filters: {
+        serviceId: serviceId || null
+      },
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages
+      }
+    });
+  } catch (error) {
+    console.error('Get partners error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while retrieving partners',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }

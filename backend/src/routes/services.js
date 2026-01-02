@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Service = require('../models/Service');
 const Partner = require('../models/Partner');
+const { authenticateToken } = require('../middleware/auth');
 
 /**
  * @swagger
@@ -451,5 +452,227 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c; // Distance in kilometers
 }
+
+/**
+ * @swagger
+ * /services/partners:
+ *   get:
+ *     summary: Get partners offering a specific service (Customer/Admin Auth Required)
+ *     tags: [Services]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: serviceId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Service ID to filter partners
+ *       - in: query
+ *         name: latitude
+ *         schema:
+ *           type: number
+ *         description: User's latitude for nearby search
+ *       - in: query
+ *         name: longitude
+ *         schema:
+ *           type: number
+ *         description: User's longitude for nearby search
+ *       - in: query
+ *         name: radius
+ *         schema:
+ *           type: number
+ *           default: 10
+ *         description: Search radius in kilometers
+ *       - in: query
+ *         name: rating
+ *         schema:
+ *           type: number
+ *           minimum: 1
+ *           maximum: 5
+ *         description: Minimum rating filter
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *         description: Page number
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *         description: Number of items per page
+ *     responses:
+ *       200:
+ *         description: Partners retrieved successfully
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Access denied - Customer or Admin role required
+ */
+router.get('/partners', authenticateToken, async (req, res) => {
+  try {
+    // Verify user is either customer or admin
+    if (req.user.role !== 'user' && req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. Customer or Admin role required.'
+      });
+    }
+
+    const { serviceId, latitude, longitude, radius = 10, rating, page = 1, limit = 20 } = req.query;
+
+    if (!serviceId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Service ID is required'
+      });
+    }
+
+    // Validate service ID format
+    if (!serviceId.match(/^[0-9a-fA-F]{24}$/)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid service ID format'
+      });
+    }
+
+    // Check if service exists
+    const service = await Service.findById(serviceId);
+    if (!service || !service.isActive) {
+      return res.status(404).json({
+        success: false,
+        message: 'Service not found or inactive'
+      });
+    }
+
+    // Build query - partners must be approved and offer this service
+    const query = {
+      approvalStatus: 'approved',
+      isApproved: true,
+      $or: [
+        { 'services.serviceId': serviceId },
+        { 'services.name': service.name },
+        { 'services.category': service.category }
+      ]
+    };
+
+    // Add rating filter if provided
+    if (rating) {
+      const minRating = parseFloat(rating);
+      if (!isNaN(minRating) && minRating >= 1 && minRating <= 5) {
+        query.rating = { $gte: minRating };
+      }
+    }
+
+    // Pagination
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    let partners;
+    let total;
+
+    // If coordinates provided, search by location
+    if (latitude && longitude) {
+      const lat = parseFloat(latitude);
+      const lng = parseFloat(longitude);
+      const searchRadius = parseFloat(radius);
+
+      // Validate coordinates
+      if (isNaN(lat) || isNaN(lng) || isNaN(searchRadius) ||
+          lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid coordinate or radius values'
+        });
+      }
+
+      // Add location-based search
+      query.location = {
+        $near: {
+          $geometry: {
+            type: 'Point',
+            coordinates: [lng, lat] // MongoDB expects [longitude, latitude]
+          },
+          $maxDistance: searchRadius * 1000 // Convert km to meters
+        }
+      };
+
+      // Get total count
+      total = await Partner.countDocuments(query);
+
+      // Find nearby partners
+      partners = await Partner.find(query)
+        .select('-password -storePhoto.data -priceList.data')
+        .sort({ rating: -1, 'location.coordinates': 1 })
+        .skip(skip)
+        .limit(limitNum);
+
+      // Calculate distances
+      partners = partners.map(partner => {
+        const partnerObj = partner.toObject();
+        if (partner.location && partner.location.coordinates) {
+          const distance = calculateDistance(lat, lng, partner.location.coordinates[1], partner.location.coordinates[0]);
+          partnerObj.distance = Math.round(distance * 100) / 100;
+        }
+        return partnerObj;
+      });
+
+      // Sort by distance
+      partners.sort((a, b) => (a.distance || 0) - (b.distance || 0));
+    } else {
+      // Get total count
+      total = await Partner.countDocuments(query);
+
+      // Find all partners offering this service (no location filter)
+      partners = await Partner.find(query)
+        .select('-password -storePhoto.data -priceList.data')
+        .sort({ rating: -1, shopName: 1 })
+        .skip(skip)
+        .limit(limitNum);
+    }
+
+    // Filter services to only show the matching service
+    partners = partners.map(partner => {
+      const partnerObj = partner.toObject();
+      if (partnerObj.services && Array.isArray(partnerObj.services)) {
+        partnerObj.services = partnerObj.services.filter(s => 
+          s.serviceId?.toString() === serviceId || 
+          s.name === service.name || 
+          s.category === service.category
+        );
+      }
+      return partnerObj;
+    });
+
+    const pages = Math.ceil(total / limitNum);
+
+    res.status(200).json({
+      success: true,
+      message: 'Partners retrieved successfully',
+      data: partners,
+      service: {
+        id: service._id,
+        name: service.name,
+        category: service.category
+      },
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages
+      }
+    });
+  } catch (error) {
+    console.error('Get partners by service error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Internal server error while retrieving partners',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
 
 module.exports = router;

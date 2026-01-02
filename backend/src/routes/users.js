@@ -82,10 +82,43 @@ router.get('/profile', authenticateToken, async (req, res) => {
  *                 example: "john@example.com"
  *               phone:
  *                 type: string
- *                 example: "+919876543210"
- *               address:
+ *                 example: "9876543210"
+ *               phoneNumber:
  *                 type: string
- *                 example: "123 Main Street, Delhi"
+ *                 example: "9876543210"
+ *               gender:
+ *                 type: string
+ *                 enum: [male, female, other]
+ *                 example: "male"
+ *               dateOfBirth:
+ *                 type: string
+ *                 format: date
+ *                 example: "1990-01-15"
+ *               profilePicture:
+ *                 type: string
+ *                 example: "https://example.com/profile.jpg"
+ *               address:
+ *                 type: object
+ *                 properties:
+ *                   street:
+ *                     type: string
+ *                     example: "123 Main Street"
+ *                   city:
+ *                     type: string
+ *                     example: "Ahmedabad"
+ *                   state:
+ *                     type: string
+ *                     example: "Gujarat"
+ *                   pincode:
+ *                     type: string
+ *                     example: "380001"
+ *                   country:
+ *                     type: string
+ *                     example: "India"
+ *               language:
+ *                 type: string
+ *                 enum: [en, hi, gu]
+ *                 example: "en"
  *               emergencyContacts:
  *                 type: array
  *                 items:
@@ -94,12 +127,18 @@ router.get('/profile', authenticateToken, async (req, res) => {
  *                     name:
  *                       type: string
  *                       example: "Emergency Contact"
+ *                     phoneNumber:
+ *                       type: string
+ *                       example: "9876543211"
  *                     phone:
  *                       type: string
- *                       example: "+919876543211"
+ *                       example: "9876543211"
  *                     relationship:
  *                       type: string
  *                       example: "Spouse"
+ *                     isPrimary:
+ *                       type: boolean
+ *                       example: false
  *     responses:
  *       200:
  *         description: Profile updated successfully
@@ -131,12 +170,45 @@ router.get('/profile', authenticateToken, async (req, res) => {
  */
 router.put('/profile', authenticateToken, validateProfileUpdate, async (req, res) => {
   try {
-    const { name, email, phone, address, emergencyContacts } = req.body;
+    // Verify user role - JWT verification is required
+    if (req.user.role !== 'user') {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied. User role required.'
+      });
+    }
+
+    const { 
+      name, 
+      email, 
+      phone, 
+      phoneNumber,
+      gender,
+      dateOfBirth,
+      profilePicture,
+      address,
+      language,
+      emergencyContacts 
+    } = req.body;
+    
     const userId = req.user.userId;
+
+    // Normalize phone number if provided
+    let normalizedPhone = phoneNumber || phone;
+    if (normalizedPhone) {
+      if (normalizedPhone.startsWith('+')) {
+        normalizedPhone = normalizedPhone.replace(/^\+91/, '').replace(/\D/g, '');
+      } else {
+        normalizedPhone = normalizedPhone.replace(/\D/g, '');
+      }
+    }
 
     // Check if email is already taken by another user
     if (email) {
-      const existingUser = await User.findOne({ email, _id: { $ne: userId } });
+      const existingUser = await User.findOne({ 
+        email: email.toLowerCase().trim(), 
+        _id: { $ne: userId } 
+      });
       if (existingUser) {
         return res.status(409).json({
           success: false,
@@ -145,9 +217,12 @@ router.put('/profile', authenticateToken, validateProfileUpdate, async (req, res
       }
     }
 
-    // Check if phone is already taken by another user
-    if (phone) {
-      const existingUser = await User.findOne({ phone, _id: { $ne: userId } });
+    // Check if phone number is already taken by another user
+    if (normalizedPhone && normalizedPhone.match(/^[6-9]\d{9}$/)) {
+      const existingUser = await User.findOne({ 
+        phoneNumber: normalizedPhone,
+        _id: { $ne: userId } 
+      });
       if (existingUser) {
         return res.status(409).json({
           success: false,
@@ -156,18 +231,45 @@ router.put('/profile', authenticateToken, validateProfileUpdate, async (req, res
       }
     }
 
+    // Normalize emergency contacts phone numbers
+    let normalizedEmergencyContacts = emergencyContacts;
+    if (emergencyContacts && Array.isArray(emergencyContacts)) {
+      normalizedEmergencyContacts = emergencyContacts.map(contact => {
+        if (contact.phone || contact.phoneNumber) {
+          let phone = contact.phoneNumber || contact.phone;
+          if (phone.startsWith('+')) {
+            phone = phone.replace(/^\+91/, '').replace(/\D/g, '');
+          } else {
+            phone = phone.replace(/\D/g, '');
+          }
+          return {
+            ...contact,
+            phoneNumber: phone.match(/^[6-9]\d{9}$/) ? phone : contact.phoneNumber
+          };
+        }
+        return contact;
+      });
+    }
+
+    // Build update object
+    const updateData = {};
+    
+    if (name) updateData.name = name.trim();
+    if (email) updateData.email = email.toLowerCase().trim();
+    if (normalizedPhone && normalizedPhone.match(/^[6-9]\d{9}$/)) {
+      updateData.phoneNumber = normalizedPhone;
+    }
+    if (gender) updateData.gender = gender;
+    if (dateOfBirth) updateData.dateOfBirth = new Date(dateOfBirth);
+    if (profilePicture) updateData.profilePicture = profilePicture;
+    if (address) updateData.address = address;
+    if (language) updateData.language = language;
+    if (normalizedEmergencyContacts) updateData.emergencyContacts = normalizedEmergencyContacts;
+
     // Update user profile
     const updatedUser = await User.findByIdAndUpdate(
       userId,
-      {
-        $set: {
-          ...(name && { name }),
-          ...(email && { email }),
-          ...(phone && { phone }),
-          ...(address && { address }),
-          ...(emergencyContacts && { emergencyContacts })
-        }
-      },
+      { $set: updateData },
       { new: true, runValidators: true }
     );
 
@@ -178,16 +280,32 @@ router.put('/profile', authenticateToken, validateProfileUpdate, async (req, res
       });
     }
 
+    // Remove sensitive data from response
+    const userResponse = updatedUser.toObject();
+    delete userResponse.password;
+    delete userResponse.otp;
+
     res.status(200).json({
       success: true,
       message: 'Profile updated successfully',
-      data: updatedUser
+      data: userResponse
     });
   } catch (error) {
     console.error('Update profile error:', error);
+    
+    // Handle duplicate key error
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern)[0];
+      return res.status(409).json({
+        success: false,
+        message: `${field} already exists`
+      });
+    }
+
     res.status(500).json({
       success: false,
-      message: 'Internal server error while updating profile'
+      message: 'Internal server error while updating profile',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });

@@ -18,11 +18,16 @@ const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/users');
 const partnerRoutes = require('./routes/partners');
 const serviceRoutes = require('./routes/services');
+const tyreRoutes = require('./routes/tyres');
+const serviceCallRoutes = require('./routes/serviceCalls');
 const bookingRoutes = require('./routes/bookings');
 const emergencyRoutes = require('./routes/emergency');
 const adminRoutes = require('./routes/admin');
 
 const app = express();
+
+// Trust proxy for accurate IP address detection (important for production with load balancers/proxies)
+app.set('trust proxy', true);
 
 // Connect to MongoDB
 connectDB();
@@ -84,6 +89,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/partners', partnerRoutes);
 app.use('/api/services', serviceRoutes);
+app.use('/api/tyres', tyreRoutes);
+app.use('/api/service-calls', serviceCallRoutes);
 app.use('/api/bookings', bookingRoutes);
 app.use('/api/emergency', emergencyRoutes);
 app.use('/api/admin', adminRoutes);
@@ -98,6 +105,8 @@ app.get('/', (req, res) => {
       users: '/api/users',
       partners: '/api/partners',
       services: '/api/services',
+      tyres: '/api/tyres',
+      serviceCalls: '/api/service-calls',
       bookings: '/api/bookings',
       emergency: '/api/emergency',
       admin: '/api/admin'

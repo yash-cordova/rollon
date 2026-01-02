@@ -93,6 +93,51 @@ const partnerSchema = new mongoose.Schema({
     enum: ['MRF', 'Apollo', 'CEAT', 'Michelin', 'JK Tyre', 'Other'],
     trim: true
   }],
+  // Tyres Offered (similar to services)
+  tyres: [{
+    tyreId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Tyre',
+      required: true
+    },
+    name: {
+      type: String,
+      required: true,
+      trim: true
+    },
+    brand: {
+      type: String,
+      required: true,
+      trim: true
+    },
+    model: {
+      type: String,
+      trim: true
+    },
+    price: {
+      type: Number,
+      required: true,
+      min: 0
+    },
+    currency: {
+      type: String,
+      default: 'INR'
+    },
+    isAvailable: {
+      type: Boolean,
+      default: true
+    },
+    vehicleType: {
+      type: String,
+      enum: ['car', 'bike', 'truck', 'bus', 'auto', 'other']
+    },
+    size: {
+      width: Number,
+      aspectRatio: Number,
+      rimDiameter: Number,
+      fullSize: String
+    }
+  }],
   storePhoto: {
     data: Buffer,
     contentType: String,
@@ -153,6 +198,11 @@ const partnerSchema = new mongoose.Schema({
   
   // Services Offered
   services: [{
+    serviceId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Service',
+      index: true
+    },
     name: {
       type: String,
       required: true

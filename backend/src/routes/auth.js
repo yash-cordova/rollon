@@ -9,7 +9,8 @@ const { validateRegistration, validateLogin } = require('../middleware/validatio
  * @swagger
  * /auth/register:
  *   post:
- *     summary: Register a new user
+ *     summary: Register a new customer
+ *     description: Anyone can register as a customer. Email is optional, but phone number is required.
  *     tags: [Authentication]
  *     requestBody:
  *       required: true
@@ -22,6 +23,7 @@ const { validateRegistration, validateLogin } = require('../middleware/validatio
  *               - email
  *               - phone
  *               - password
+ *               - gender
  *             properties:
  *               name:
  *                 type: string
@@ -30,13 +32,57 @@ const { validateRegistration, validateLogin } = require('../middleware/validatio
  *                 type: string
  *                 format: email
  *                 example: "john@example.com"
+ *                 description: Email address (required)
  *               phone:
  *                 type: string
- *                 example: "+919876543210"
+ *                 example: "9876543210"
+ *                 description: 10-digit Indian mobile number (can also be +919876543210)
+ *               phoneNumber:
+ *                 type: string
+ *                 example: "9876543210"
+ *                 description: Alternative field for 10-digit Indian mobile number
  *               password:
  *                 type: string
  *                 minLength: 6
  *                 example: "password123"
+ *               gender:
+ *                 type: string
+ *                 enum: [male, female, other]
+ *                 example: "male"
+ *                 description: Gender (required)
+ *               dateOfBirth:
+ *                 type: string
+ *                 format: date
+ *                 example: "1990-01-15"
+ *                 description: Date of birth (optional)
+ *               profilePicture:
+ *                 type: string
+ *                 example: "https://example.com/profile.jpg"
+ *                 description: Profile picture URL (optional)
+ *               address:
+ *                 type: object
+ *                 properties:
+ *                   street:
+ *                     type: string
+ *                     example: "123 Main Street"
+ *                   city:
+ *                     type: string
+ *                     example: "Ahmedabad"
+ *                   state:
+ *                     type: string
+ *                     example: "Gujarat"
+ *                   pincode:
+ *                     type: string
+ *                     example: "380001"
+ *                   country:
+ *                     type: string
+ *                     example: "India"
+ *                 description: Address details (optional)
+ *               language:
+ *                 type: string
+ *                 enum: [en, hi, gu]
+ *                 example: "en"
+ *                 description: Preferred language (optional)
  *               vehicleDetails:
  *                 type: object
  *                 properties:
@@ -52,9 +98,10 @@ const { validateRegistration, validateLogin } = require('../middleware/validatio
  *                   registrationNumber:
  *                     type: string
  *                     example: "DL01AB1234"
+ *                 description: Vehicle details (optional)
  *     responses:
  *       201:
- *         description: User registered successfully
+ *         description: Customer registered successfully
  *         content:
  *           application/json:
  *             schema:
@@ -65,7 +112,7 @@ const { validateRegistration, validateLogin } = require('../middleware/validatio
  *                   example: true
  *                 message:
  *                   type: string
- *                   example: "User registered successfully"
+ *                   example: "Customer registered successfully"
  *                 data:
  *                   $ref: '#/components/schemas/User'
  *       400:
@@ -83,49 +130,120 @@ const { validateRegistration, validateLogin } = require('../middleware/validatio
  */
 router.post('/register', validateRegistration, async (req, res) => {
   try {
-    const { name, email, phone, password, vehicleDetails } = req.body;
+    const { 
+      name, 
+      email, 
+      phone, 
+      phoneNumber, 
+      password, 
+      gender,
+      dateOfBirth,
+      profilePicture,
+      address,
+      language,
+      vehicleDetails 
+    } = req.body;
 
-    // Check if user already exists
-    const existingUser = await User.findOne({
-      $or: [{ email }, { phone }]
-    });
+    // Normalize phone number (accept both phone and phoneNumber)
+    let normalizedPhone = phoneNumber || phone;
+    
+    // If phone has country code, extract 10-digit number
+    if (normalizedPhone && normalizedPhone.startsWith('+')) {
+      // Remove + and country code (91 for India)
+      normalizedPhone = normalizedPhone.replace(/^\+91/, '').replace(/\D/g, '');
+    } else if (normalizedPhone) {
+      // Remove all non-digit characters
+      normalizedPhone = normalizedPhone.replace(/\D/g, '');
+    }
 
-    if (existingUser) {
-      return res.status(409).json({
+    // Validate phone number format (10 digits starting with 6-9)
+    if (!normalizedPhone || !normalizedPhone.match(/^[6-9]\d{9}$/)) {
+      return res.status(400).json({
         success: false,
-        message: existingUser.email === email ? 'Email already registered' : 'Phone number already registered'
+        message: 'Please provide a valid 10-digit Indian mobile number'
       });
     }
 
-    // Hash password
-    const saltRounds = 12;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
-
-    // Create new user
-    const user = new User({
-      name,
-      email,
-      phone,
-      password: hashedPassword,
-      vehicleDetails: vehicleDetails || {}
+    // Check if user already exists by email or phone
+    const existingUser = await User.findOne({
+      $or: [
+        { email: email.toLowerCase().trim() },
+        { phoneNumber: normalizedPhone }
+      ]
     });
 
+    if (existingUser) {
+      if (existingUser.email === email.toLowerCase().trim()) {
+        return res.status(409).json({
+          success: false,
+          message: 'Email already registered'
+        });
+      }
+      if (existingUser.phoneNumber === normalizedPhone) {
+        return res.status(409).json({
+          success: false,
+          message: 'Phone number already registered'
+        });
+      }
+    }
+
+    // Create new user - password will be hashed by pre-save hook
+    const userData = {
+      name: name.trim(),
+      email: email.toLowerCase().trim(),
+      phoneNumber: normalizedPhone,
+      password: password.trim(), // Will be hashed by pre-save hook
+      gender: gender, // Mandatory field
+      ...(dateOfBirth && { dateOfBirth: new Date(dateOfBirth) }),
+      ...(profilePicture && { profilePicture }),
+      ...(address && { address }),
+      ...(language && { language })
+    };
+
+    // Add vehicle details if provided
+    if (vehicleDetails) {
+      if (vehicleDetails.make || vehicleDetails.model || vehicleDetails.year || vehicleDetails.registrationNumber) {
+        userData.vehicles = [{
+          type: vehicleDetails.type || 'car',
+          brand: vehicleDetails.make || vehicleDetails.brand,
+          model: vehicleDetails.model,
+          year: vehicleDetails.year,
+          registrationNumber: vehicleDetails.registrationNumber,
+          color: vehicleDetails.color,
+          fuelType: vehicleDetails.fuelType || 'petrol'
+        }];
+      }
+    }
+
+    const user = new User(userData);
     await user.save();
 
     // Remove password from response
     const userResponse = user.toObject();
     delete userResponse.password;
+    delete userResponse.otp;
 
     res.status(201).json({
       success: true,
-      message: 'User registered successfully',
+      message: 'Customer registered successfully',
       data: userResponse
     });
   } catch (error) {
     console.error('Registration error:', error);
+    
+    // Handle duplicate key error
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern)[0];
+      return res.status(409).json({
+        success: false,
+        message: `${field} already exists`
+      });
+    }
+
     res.status(500).json({
       success: false,
-      message: 'Internal server error during registration'
+      message: 'Internal server error during registration',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
@@ -134,7 +252,8 @@ router.post('/register', validateRegistration, async (req, res) => {
  * @swagger
  * /auth/login:
  *   post:
- *     summary: Login user
+ *     summary: Login customer with email or phone
+ *     description: Login using either email or phone number along with password
  *     tags: [Authentication]
  *     requestBody:
  *       required: true
@@ -143,13 +262,28 @@ router.post('/register', validateRegistration, async (req, res) => {
  *           schema:
  *             type: object
  *             required:
- *               - email
  *               - password
+ *             oneOf:
+ *               - required:
+ *                   - email
+ *               - required:
+ *                   - phone
+ *               - required:
+ *                   - phoneNumber
  *             properties:
  *               email:
  *                 type: string
  *                 format: email
  *                 example: "john@example.com"
+ *                 description: Email address (required if phone not provided)
+ *               phone:
+ *                 type: string
+ *                 example: "9876543210"
+ *                 description: 10-digit Indian mobile number (can also be +919876543210) - required if email not provided
+ *               phoneNumber:
+ *                 type: string
+ *                 example: "9876543210"
+ *                 description: Alternative field for 10-digit Indian mobile number
  *               password:
  *                 type: string
  *                 example: "password123"
@@ -184,48 +318,78 @@ router.post('/register', validateRegistration, async (req, res) => {
  */
 router.post('/login', validateLogin, async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, phone, phoneNumber, password } = req.body;
 
-    // Find user by email
-    const user = await User.findOne({ email }).select('+password');
+    // Normalize phone number if provided
+    let normalizedPhone = phoneNumber || phone;
+    if (normalizedPhone) {
+      // Remove country code and non-digits
+      if (normalizedPhone.startsWith('+')) {
+        normalizedPhone = normalizedPhone.replace(/^\+91/, '').replace(/\D/g, '');
+      } else {
+        normalizedPhone = normalizedPhone.replace(/\D/g, '');
+      }
+    }
+
+    // Build query to find user by email or phone
+    const query = {};
+    if (email) {
+      query.email = email.toLowerCase().trim();
+    } else if (normalizedPhone) {
+      query.phoneNumber = normalizedPhone;
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'Either email or phone number is required'
+      });
+    }
+
+    // Find user
+    const user = await User.findOne(query).select('+password');
     if (!user) {
       return res.status(401).json({
         success: false,
-        message: 'Invalid email or password'
+        message: 'Invalid email/phone or password'
       });
     }
 
     // Check if user is active
-    if (user.status !== 'active') {
-      return res.status(401).json({
+    if (!user.isActive) {
+      return res.status(403).json({
         success: false,
         message: 'Account is not active. Please contact support.'
       });
     }
 
     // Verify password
-    const isPasswordValid = await bcrypt.compare(password, user.password);
+    const isPasswordValid = await bcrypt.compare(password.trim(), user.password);
     if (!isPasswordValid) {
       return res.status(401).json({
         success: false,
-        message: 'Invalid email or password'
+        message: 'Invalid email/phone or password'
       });
     }
 
     // Generate JWT token
     const token = jwt.sign(
-      { userId: user._id, email: user.email, role: 'user' },
+      { 
+        userId: user._id, 
+        email: user.email || user.phoneNumber, 
+        role: 'user' 
+      },
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
 
-    // Update last login
+    // Update last login and last active
     user.lastLogin = new Date();
+    user.lastActive = new Date();
     await user.save();
 
     // Remove password from response
     const userResponse = user.toObject();
     delete userResponse.password;
+    delete userResponse.otp;
 
     res.status(200).json({
       success: true,
@@ -239,7 +403,8 @@ router.post('/login', validateLogin, async (req, res) => {
     console.error('Login error:', error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error during login'
+      message: 'Internal server error during login',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
